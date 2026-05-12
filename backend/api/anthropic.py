@@ -25,6 +25,7 @@ from backend.services.client_profiles import CLAUDE_CODE_OPENAI_PROFILE
 from backend.toolcore.prompt_builder import messages_to_prompt
 from backend.services.response_formatters import build_anthropic_message_payload
 from backend.services.qwen_client import QwenClient
+from backend.services.token_calc import count_tokens
 from backend.adapter.standard_request import normalize_tool_choice
 from backend.toolcore.request_normalizer import normalize_anthropic_request, to_prompt_payload
 from backend.toolcore.task_session import (
@@ -36,7 +37,6 @@ from backend.toolcore.task_session import (
     plan_persistent_session_turn,
 )
 from backend.services.completion_bridge import run_retryable_completion_bridge
-from backend.services.token_calc import count_tokens
 from backend.toolcall.normalize import build_tool_name_registry
 
 log = logging.getLogger("qwen2api.anthropic")
@@ -133,6 +133,9 @@ def _build_standard_request(req_data: dict) -> StandardRequest:
     model_name = req_data.get("model", "claude-3-5-sonnet")
     normalized_request = normalize_anthropic_request(req_data)
     normalized_payload = to_prompt_payload(normalized_request, model=model_name, stream=bool(req_data.get("stream", False)))
+    for field_name in ("system", "developer", "instructions"):
+        if field_name in req_data:
+            normalized_payload[field_name] = req_data.get(field_name, "")
     prompt_result = messages_to_prompt(normalized_payload, client_profile=CLAUDE_CODE_OPENAI_PROFILE)
     prompt = prompt_result.prompt
     tools = prompt_result.tools
@@ -158,7 +161,7 @@ def _build_standard_request(req_data: dict) -> StandardRequest:
 
 
 def _anthropic_usage(prompt: str, answer_text: str) -> dict[str, int]:
-    return {"input_tokens": len(prompt), "output_tokens": len(answer_text)}
+    return {"input_tokens": count_tokens(prompt), "output_tokens": count_tokens(answer_text)}
 
 
 def _message_start_event(msg_id: str, model_name: str, prompt: str, answer_text: str) -> str:
@@ -169,15 +172,17 @@ def _visible_answer_text_length(*, directive, execution, stream_state: _Anthropi
     if directive.stop_reason == "tool_use":
         return 0
     if stream_state is not None:
-        return sum(len(text_chunk) for _, text_chunk in stream_state.answer_text_buffer)
-    return len(execution.state.answer_text)
+        buffered_text = "".join(text_chunk for _, text_chunk in stream_state.answer_text_buffer)
+        if buffered_text:
+            return count_tokens(buffered_text)
+    return count_tokens(execution.state.answer_text)
 
 
 async def _add_used_tokens_for_prompt(*, users_db, token: str, prompt_text: str, answer_text_length: int) -> None:
     users = await users_db.get()
     for user in users:
         if user["id"] == token:
-            user["used_tokens"] += answer_text_length + len(prompt_text)
+            user["used_tokens"] += answer_text_length + count_tokens(prompt_text)
             break
     await users_db.save(users)
 
@@ -387,7 +392,7 @@ async def anthropic_messages(request: Request):
                                 users_db=users_db,
                                 token=token,
                                 prompt_text=current_prompt,
-                                answer_text_length=len(execution.state.answer_text),
+                                answer_text_length=count_tokens(execution.state.answer_text),
                             )
                             assistant_message = build_anthropic_assistant_history_message(
                                 execution=execution,

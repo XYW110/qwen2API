@@ -94,7 +94,7 @@ def _assistant_tool_call_markup(message: dict[str, Any], client_profile: str) ->
 
 def render_session_message(message: dict[str, Any], *, client_profile: str, tools_enabled: bool) -> str:
     role = message.get("role", "")
-    if role not in ("user", "assistant", "system", "tool"):
+    if role not in ("user", "assistant", "system", "developer", "tool"):
         return ""
 
     if role == "tool":
@@ -130,6 +130,7 @@ def render_session_message(message: dict[str, Any], *, client_profile: str, tool
         "user": "Human: ",
         "assistant": "Assistant: ",
         "system": "System: ",
+        "developer": "System: ",
     }.get(role, "")
     return text if is_tool_result_only_user_msg else f"{prefix}{text}"
 
@@ -259,8 +260,13 @@ def build_retry_rebase_prompt(request: StandardRequest, *, reason: str | None = 
 
 async def plan_persistent_session_turn(*, app, request: StandardRequest, payload: dict[str, Any], surface: str) -> PersistentSessionPlan:
     full_prompt = request.prompt
+    messages_for_hash = []
+    for field_name, role in (('system', 'system'), ('developer', 'developer'), ('instructions', 'system')):
+        if payload.get(field_name):
+            messages_for_hash.append({'role': role, 'content': payload.get(field_name)})
+    messages_for_hash.extend(payload.get('messages', []) or [])
     entries = extract_session_history_entries(
-        payload.get('messages', []) or [],
+        messages_for_hash,
         client_profile=request.client_profile,
         tools_enabled=bool(request.tools),
     )

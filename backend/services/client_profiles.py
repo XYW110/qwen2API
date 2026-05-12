@@ -232,35 +232,33 @@ def extract_user_text_only(content: Any, client_profile: str = OPENCLAW_OPENAI_P
     return "\n".join(text_blocks)
 
 
+def _extract_system_text(content: Any) -> str:
+    if isinstance(content, str):
+        return sanitize_runtime_prompt_text(content, "system")
+    if isinstance(content, list):
+        return "\n".join(
+            sanitize_runtime_prompt_text(part.get("text", ""), "system")
+            for part in content
+            if isinstance(part, dict) and part.get("type", "") in {"text", "input_text", "output_text"}
+        )
+    return ""
+
+
 def extract_system_prompt(req_data: dict[str, Any], *, client_profile: str = OPENCLAW_OPENAI_PROFILE) -> str:
     del client_profile
-    system_prompt = ""
-    sys_field = req_data.get("system", "")
-    if isinstance(sys_field, list):
-        system_prompt = " ".join(
-            sanitize_runtime_prompt_text(part.get("text", ""), "system")
-            for part in sys_field
-            if isinstance(part, dict)
-        )
-    elif isinstance(sys_field, str):
-        system_prompt = sanitize_runtime_prompt_text(sys_field, "system")
-
-    if system_prompt:
-        return system_prompt
+    system_parts: list[str] = []
+    for field_name in ("system", "developer", "instructions"):
+        system_text = _extract_system_text(req_data.get(field_name, ""))
+        if system_text:
+            system_parts.append(system_text)
 
     for msg in req_data.get("messages", []) or []:
-        if msg.get("role") != "system":
+        if msg.get("role") not in {"system", "developer"}:
             continue
-        content = msg.get("content", "")
-        if isinstance(content, str):
-            return sanitize_runtime_prompt_text(content, "system")
-        if isinstance(content, list):
-            return "\n".join(
-                sanitize_runtime_prompt_text(part.get("text", ""), "system")
-                for part in content
-                if isinstance(part, dict) and part.get("type", "") == "text"
-            )
-    return ""
+        system_text = _extract_system_text(msg.get("content", ""))
+        if system_text:
+            system_parts.append(system_text)
+    return "\n\n".join(system_parts)
 
 
 def looks_like_opencode_system_prompt(system_prompt: str) -> bool:

@@ -119,7 +119,7 @@ class OpenAIStreamTranslator:
         if tool_calls:
             self.tool_calls_emitted = True
 
-    def finalize(self, finish_reason: str) -> list[str]:
+    def finalize(self, finish_reason: str, *, usage: dict[str, int] | None = None) -> list[str]:
         final_finish_reason = finish_reason
         if self.build_final_directive is not None and not self.tool_calls_emitted:
             directive = self.build_final_directive("".join(self.answer_fragments))
@@ -153,5 +153,9 @@ class OpenAIStreamTranslator:
         chunks.append(
             f"data: {json.dumps({'id': self.completion_id, 'object': 'chat.completion.chunk', 'created': self.created, 'model': self.model_name, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': final_finish_reason}]}, ensure_ascii=False)}\n\n"
         )
+        if usage is not None:
+            chunks.append(
+                f"data: {json.dumps({'id': self.completion_id, 'object': 'chat.completion.chunk', 'created': self.created, 'model': self.model_name, 'choices': [], 'usage': usage}, ensure_ascii=False)}\n\n"
+            )
         chunks.append("data: [DONE]\n\n")
         return chunks

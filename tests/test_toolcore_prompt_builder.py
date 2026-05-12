@@ -111,6 +111,36 @@ class ToolCorePromptBuilderTests(unittest.TestCase):
         self.assertIn("Tool availability (filtered by policy): Read, Bash.", result.prompt)
         self.assertIn("=== MANDATORY TOOL CALL INSTRUCTIONS ===", result.prompt)
 
+    def test_messages_to_prompt_combines_system_and_developer_presets(self) -> None:
+        req_data = {
+            "messages": [
+                {"role": "system", "content": "You are the original client runtime."},
+                {"role": "developer", "content": "Always answer as a pirate captain."},
+                {"role": "user", "content": "Who are you?"},
+            ],
+        }
+
+        result = messages_to_prompt(req_data, client_profile=OPENCLAW_OPENAI_PROFILE)
+
+        self.assertIn("You are the original client runtime.", result.prompt)
+        self.assertIn("Always answer as a pirate captain.", result.prompt)
+        self.assertIn("<system>\n", result.prompt)
+
+    def test_messages_to_prompt_preserves_top_level_developer_and_instructions(self) -> None:
+        req_data = {
+            "system": "You are the original client runtime.",
+            "developer": "Always answer as a pirate captain.",
+            "instructions": "Never claim to be a robot.",
+            "messages": [{"role": "user", "content": "Who are you?"}],
+        }
+
+        result = messages_to_prompt(req_data, client_profile=OPENCLAW_OPENAI_PROFILE)
+
+        self.assertIn("You are the original client runtime.", result.prompt)
+        self.assertIn("Always answer as a pirate captain.", result.prompt)
+        self.assertIn("Never claim to be a robot.", result.prompt)
+        self.assertIn("<system>\n", result.prompt)
+
     def test_messages_to_prompt_preserves_message_role_system_prompt_with_tool_markers(self) -> None:
         req_data = {
             "messages": [

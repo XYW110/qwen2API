@@ -28,17 +28,35 @@ def _is_retryable_attachment_upload_error(exc: Exception) -> bool:
     return any(marker in lowered for marker in markers)
 
 
-def derive_session_key(surface: str, auth_token: str, payload: dict[str, Any]) -> str:
-    explicit = (payload.get("session_key") or payload.get("conversation_id") or payload.get("metadata", {}).get("conversation_id") if isinstance(payload.get("metadata"), dict) else None)
-    if explicit:
-        return str(explicit)
-    first_user = next((m for m in payload.get("messages", []) if m.get("role") == "user"), {})
-    content = first_user.get("content", "")
+def _text_from_content(content: Any) -> str:
     if isinstance(content, list):
-        first_text = "\n".join(str(part.get("text", "")) for part in content if isinstance(part, dict) and part.get("type") == "text")
-    else:
-        first_text = str(content)
-    basis = f"{surface}::{auth_token}::{payload.get('model', '')}::{first_text[:400]}"
+        return "\n".join(
+            str(part.get("text", ""))
+            for part in content
+            if isinstance(part, dict) and part.get("type") in {"text", "input_text", "output_text"}
+        )
+    return str(content or "")
+
+
+def derive_session_key(surface: str, auth_token: str, payload: dict[str, Any]) -> str:
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    explicit = payload.get("session_key") or payload.get("conversation_id") or metadata.get("conversation_id")
+    messages = payload.get("messages", []) or []
+    first_user = next((m for m in messages if m.get("role") == "user"), {})
+    first_text = _text_from_content(first_user.get("content", ""))
+    system_text = _text_from_content(payload.get("system", ""))
+    developer_parts = [_text_from_content(payload.get("developer", ""))]
+    developer_parts.extend(
+        _text_from_content(message.get("content", ""))
+        for message in messages
+        if message.get("role") in {"system", "developer"}
+    )
+    developer_text = "\n".join(part for part in developer_parts if part)
+    instructions_text = _text_from_content(payload.get("instructions", ""))
+    persona_basis = f"{system_text[:400]}::{developer_text[:400]}::{instructions_text[:400]}"
+    explicit_text = str(explicit or "")
+    user_basis = "" if explicit else f"::{first_text[:400]}"
+    basis = f"{surface}::{auth_token}::{payload.get('model', '')}::{explicit_text}::{persona_basis}{user_basis}"
     return hashlib.sha256(basis.encode("utf-8", errors="ignore")).hexdigest()[:24]
 
 

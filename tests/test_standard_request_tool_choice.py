@@ -78,6 +78,21 @@ class StandardRequestToolChoiceTests(unittest.TestCase):
                 surface="openai",
             )
 
+    def test_top_level_developer_and_instructions_are_preserved(self) -> None:
+        request = build_chat_standard_request(
+            {
+                "model": "gpt-4.1",
+                "developer": "Always answer as a pirate captain.",
+                "instructions": "Never claim to be a robot.",
+                "messages": [{"role": "user", "content": "Who are you?"}],
+            },
+            default_model="gpt-4.1",
+            surface="openai",
+        )
+
+        self.assertIn("Always answer as a pirate captain.", request.prompt)
+        self.assertIn("Never claim to be a robot.", request.prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

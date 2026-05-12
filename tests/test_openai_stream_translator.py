@@ -2,6 +2,7 @@ import json
 import unittest
 
 from backend.services.openai_stream_translator import OpenAIStreamTranslator
+from backend.services.token_calc import calculate_usage
 
 
 class OpenAIStreamTranslatorTests(unittest.TestCase):
@@ -29,6 +30,23 @@ class OpenAIStreamTranslatorTests(unittest.TestCase):
         rebuilt = "".join(chunk["function"].get("arguments", "") for chunk in tool_call_chunks[1:])
         self.assertEqual(rebuilt, json.dumps({"file_path": "a" * 300}, ensure_ascii=False))
         self.assertGreater(len(tool_call_chunks), 2)
+
+    def test_finalize_can_emit_token_usage_chunk(self) -> None:
+        translator = OpenAIStreamTranslator(
+            completion_id="chatcmpl_usage",
+            created=1,
+            model_name="gpt-4.1",
+            client_profile="openclaw_openai",
+        )
+        translator.on_delta({"phase": "answer"}, "hello", None)
+        usage = calculate_usage("prompt text", "hello")
+
+        chunks = translator.finalize("stop", usage=usage)
+
+        payloads = [json.loads(chunk[6:].strip()) for chunk in chunks if chunk.startswith("data: ") and chunk.strip() != "data: [DONE]"]
+        usage_payload = payloads[-1]
+        self.assertEqual(usage_payload["choices"], [])
+        self.assertEqual(usage_payload["usage"], usage)
 
     def test_finalize_drops_incomplete_tool_wrapper_text_when_valid_tool_call_exists(self) -> None:
         directive = type(

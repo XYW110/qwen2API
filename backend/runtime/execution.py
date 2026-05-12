@@ -12,6 +12,7 @@ from backend.core.config import settings
 from backend.core.request_logging import update_request_context
 from backend.runtime.stream_metrics import StreamMetrics
 from backend.services import tool_parser
+from backend.services.token_calc import count_tokens
 from backend.toolcore.directive_parser import parse_state_tool_calls, parse_textual_tool_calls
 from backend.toolcore.policy import evaluate_tool_policy, recent_same_tool_identity_count_in_turn
 from backend.toolcore.stream_sieve import ToolStreamSieve
@@ -733,7 +734,7 @@ def build_tool_directive(
 
 
 def anthropic_stream_usage_delta(prompt: str, answer_text: str) -> int:
-    return len(answer_text) + len(prompt)
+    return count_tokens(answer_text) + count_tokens(prompt)
 
 
 def anthropic_stream_stop_reason(request: StandardRequest, state: RuntimeAttemptState, pending_chunks: list[str]) -> str:
@@ -773,11 +774,11 @@ def inject_assistant_message(prompt: str, message: str) -> str:
 
 
 def retryable_usage_delta(prompt: str):
-    return lambda execution, current_prompt=None: len(execution.state.answer_text) + len(current_prompt or prompt)
+    return lambda execution, current_prompt=None: count_tokens(execution.state.answer_text) + count_tokens(current_prompt or prompt)
 
 
 def build_usage_delta_factory(prompt: str) -> Callable[[RuntimeExecutionResult, Any | None], int]:
-    return lambda execution, current_prompt=None: len(execution.state.answer_text) + len(current_prompt or prompt)
+    return lambda execution, current_prompt=None: count_tokens(execution.state.answer_text) + count_tokens(current_prompt or prompt)
 
 
 def request_max_attempts(request: StandardRequest) -> int:

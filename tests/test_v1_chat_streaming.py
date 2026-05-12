@@ -35,8 +35,8 @@ class _FakeTranslator:
         if text_chunk:
             self.pending_chunks.append(f"data: {text_chunk}\n\n")
 
-    def finalize(self, finish_reason):
-        return [f"data: FINAL-{finish_reason}\n\n"]
+    def finalize(self, finish_reason, *, usage=None):
+        return [f"data: FINAL-{finish_reason}-{usage['total_tokens'] if usage else 0}\n\n"]
 
 
 class _FakeRequest:
@@ -79,6 +79,7 @@ class V1ChatStreamingTests(unittest.IsolatedAsyncioTestCase):
             return types.SimpleNamespace(
                 execution=types.SimpleNamespace(state=types.SimpleNamespace(finish_reason="stop")),
                 directive=None,
+                usage={"prompt_tokens": 2, "completion_tokens": 5, "total_tokens": 7},
             )
 
         chunks = []
@@ -100,7 +101,7 @@ class V1ChatStreamingTests(unittest.IsolatedAsyncioTestCase):
                 chunks.append(chunk)
 
         self.assertEqual(chunks[0], "data: chunk-1\n\n")
-        self.assertEqual(chunks[-1], "data: FINAL-stop\n\n")
+        self.assertEqual(chunks[-1], "data: FINAL-stop-7\n\n")
 
     async def test_streaming_response_does_not_leak_cross_chunk_tool_prefix(self) -> None:
         app = types.SimpleNamespace(

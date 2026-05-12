@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 from backend.api import anthropic
 from backend.services.response_formatters import build_anthropic_message_payload
+from backend.services.token_calc import count_tokens
 
 
 class AnthropicToolCoreIntegrationTests(unittest.TestCase):
@@ -38,6 +39,31 @@ class AnthropicToolCoreIntegrationTests(unittest.TestCase):
                 }
             )
 
+    def test_build_standard_request_preserves_top_level_system_prompt(self) -> None:
+        request = anthropic._build_standard_request(
+            {
+                "model": "claude-3-5-sonnet",
+                "system": "Always answer as a pirate captain.",
+                "messages": [{"role": "user", "content": "Who are you?"}],
+            }
+        )
+
+        self.assertIn("Always answer as a pirate captain.", request.prompt)
+        self.assertIn("<system>\n", request.prompt)
+
+    def test_build_standard_request_preserves_top_level_developer_and_instructions(self) -> None:
+        request = anthropic._build_standard_request(
+            {
+                "model": "claude-3-5-sonnet",
+                "developer": "Always answer as a pirate captain.",
+                "instructions": "Never claim to be a robot.",
+                "messages": [{"role": "user", "content": "Who are you?"}],
+            }
+        )
+
+        self.assertIn("Always answer as a pirate captain.", request.prompt)
+        self.assertIn("Never claim to be a robot.", request.prompt)
+
     def test_build_standard_request_normalizes_anthropic_tools(self) -> None:
         request = anthropic._build_standard_request(
             {
@@ -55,6 +81,31 @@ class AnthropicToolCoreIntegrationTests(unittest.TestCase):
 
         self.assertEqual(request.tool_names, ["Read"])
         self.assertEqual(request.tools[0]["parameters"], {"type": "object", "properties": {"file_path": {"type": "string"}}})
+
+    def test_anthropic_stream_usage_uses_token_counts(self) -> None:
+        prompt = "hello world hello world hello world"
+        answer_text = "I will keep this concise."
+
+        usage = anthropic._anthropic_usage(prompt, answer_text)
+
+        self.assertEqual(usage["input_tokens"], count_tokens(prompt))
+        self.assertEqual(usage["output_tokens"], count_tokens(answer_text))
+        self.assertNotEqual(usage["input_tokens"], len(prompt))
+
+    def test_visible_answer_tokens_survive_stream_buffer_flush(self) -> None:
+        answer_text = "I will keep this concise."
+        stream_state = anthropic._AnthropicStreamState(msg_id="msg_1", model_name="claude-3-5-sonnet", prompt="prompt")
+        stream_state.buffer_answer_text(answer_text)
+        stream_state.flush_answer_text()
+        execution = SimpleNamespace(state=SimpleNamespace(answer_text=answer_text))
+
+        output_tokens = anthropic._visible_answer_text_length(
+            directive=SimpleNamespace(stop_reason="end_turn"),
+            execution=execution,
+            stream_state=stream_state,
+        )
+
+        self.assertEqual(output_tokens, count_tokens(answer_text))
 
     def test_anthropic_message_payload_formatter_matches_tool_directive(self) -> None:
         request = anthropic._build_standard_request(

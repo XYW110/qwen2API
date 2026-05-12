@@ -15,6 +15,7 @@ from backend.services.auth_quota import add_used_tokens, resolve_auth_context
 from backend.services.completion_bridge import run_retryable_completion_bridge
 from backend.services.openai_stream_translator import OpenAIStreamTranslator
 from backend.services.response_formatters import build_openai_completion_payload
+from backend.services.token_calc import calculate_usage
 from backend.services.qwen_client import QwenClient
 from backend.services.standard_request_builder import build_chat_standard_request
 from backend.toolcore.task_session import (
@@ -29,6 +30,17 @@ from backend.runtime.execution import RuntimeAttemptState, build_tool_directive,
 log = logging.getLogger("qwen2api.chat")
 router = APIRouter()
 OpenAIDeltaHandler = Callable[[dict[str, Any], str | None, list[dict[str, Any]] | None], Awaitable[None]]
+
+
+def _stream_usage(result, prompt: str) -> dict[str, int]:
+    usage = getattr(result, "usage", None)
+    if isinstance(usage, dict):
+        return usage
+    execution = getattr(result, "execution", None)
+    state = getattr(execution, "state", None)
+    answer_text = getattr(state, "answer_text", "") or ""
+    result_prompt = getattr(result, "prompt", prompt) or prompt
+    return calculate_usage(result_prompt, answer_text)
 
 
 def _detect_openai_client_profile(request: Request, req_data: dict) -> str:
@@ -196,7 +208,7 @@ async def chat_completions(request: Request):
                                 for chunk in staged_chunks:
                                     await queue.put(chunk)
                                 if translator is not None:
-                                    for chunk in translator.finalize(final_finish_reason):
+                                    for chunk in translator.finalize(final_finish_reason, usage=_stream_usage(result, prompt)):
                                         await queue.put(chunk)
                             else:
                                 translator = OpenAIStreamTranslator(
@@ -245,7 +257,7 @@ async def chat_completions(request: Request):
                                     assistant_message=assistant_message,
                                 )
                                 final_finish_reason = "tool_calls" if directive.stop_reason == "tool_use" else (execution.state.finish_reason or "stop")
-                                for chunk in translator.finalize(final_finish_reason):
+                                for chunk in translator.finalize(final_finish_reason, usage=_stream_usage(result, prompt)):
                                     await queue.put(chunk)
                         except HTTPException as he:
                             await clear_invalidated_session_chat(app=app, request=standard_request)

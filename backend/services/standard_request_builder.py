@@ -13,6 +13,9 @@ def build_chat_standard_request(req_data: dict, *, default_model: str, surface: 
     effective_client_profile = infer_client_profile(req_data, fallback_profile=client_profile)
     normalized_request = normalize_chat_request(req_data)
     normalized_payload = to_prompt_payload(normalized_request, model=requested_model, stream=bool(req_data.get("stream", False)))
+    for field_name in ("system", "developer", "instructions"):
+        if field_name in req_data:
+            normalized_payload[field_name] = req_data.get(field_name, "")
     prompt_result = messages_to_prompt(normalized_payload, client_profile=effective_client_profile)
     tools = prompt_result.tools
     tool_names = [tool_name for tool_name in (tool.get("name") for tool in tools) if isinstance(tool_name, str) and tool_name]

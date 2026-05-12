@@ -194,9 +194,9 @@ def build_prompt_with_tools(
         if msg_count >= max_history_msgs:
             break
         role = msg.get("role", "")
-        if role not in ("user", "assistant", "system", "tool"):
+        if role not in ("user", "assistant", "system", "developer", "tool"):
             continue
-        if role == "system" and system_prompt and _extract_system_text_only(msg.get("content", "")).strip() == system_prompt.strip():
+        if role in {"system", "developer"} and system_prompt and _extract_system_text_only(msg.get("content", "")).strip() in system_prompt.strip():
             continue
 
         if role == "tool":
@@ -225,7 +225,7 @@ def build_prompt_with_tools(
             continue
 
         user_text_only = _extract_user_text_only(msg.get("content", ""), client_profile=client_profile) if role == "user" else ""
-        if role == "system":
+        if role in {"system", "developer"}:
             text = _extract_system_text_only(msg.get("content", ""))
         else:
             text = _extract_text(
@@ -274,7 +274,7 @@ def build_prompt_with_tools(
         if len(text) > max_len:
             text = text[:max_len] + "...[truncated]"
         is_tool_result_only_user_msg = role == "user" and not user_text_only.strip() and bool(text.strip())
-        prefix = "" if is_tool_result_only_user_msg else {"user": "Human: ", "assistant": "Assistant: ", "system": "System: "}.get(role, "")
+        prefix = "" if is_tool_result_only_user_msg else {"user": "Human: ", "assistant": "Assistant: ", "system": "System: ", "developer": "System: "}.get(role, "")
         line = text if is_tool_result_only_user_msg else f"{prefix}{text}"
         if used + len(line) + 2 > budget and history_parts:
             break
