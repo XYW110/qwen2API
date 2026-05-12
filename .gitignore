@@ -17,7 +17,6 @@ legacy/
 *legacy*.py
 
 # Tests and scripts
-test_*.py
 add_account.py
 fix_*.py
 
@@ -41,5 +40,4 @@ fix_*.py
 *.sw?
 
 # local cleanup
-tests/
 docs/superpowers/

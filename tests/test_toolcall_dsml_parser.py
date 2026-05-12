@@ -1,5 +1,10 @@
 import unittest
 
+from backend.toolcall.formats_dsml import (
+    consume_dsml_tool_capture,
+    has_open_dsml_tool_tag,
+    parse_dsml_format,
+)
 from backend.toolcall.markup_scan import (
     contains_tool_markup_syntax_outside_ignored,
     find_matching_tool_markup_close,
@@ -30,6 +35,13 @@ class DSMLMarkupScannerTests(unittest.TestCase):
         self.assertIsNotNone(tag)
         self.assertEqual(tag.name, "invoke")
         self.assertFalse(tag.closing)
+
+    def test_finds_cjk_drift_closing_tag(self) -> None:
+        tag = find_tool_markup_tag_outside_ignored('<！/DSML！invoke>')
+
+        self.assertIsNotNone(tag)
+        self.assertEqual(tag.name, "invoke")
+        self.assertTrue(tag.closing)
 
     def test_matches_nested_wrapper_close(self) -> None:
         text = "<|DSML|tool_calls><|DSML|tool_calls></|DSML|tool_calls></|DSML|tool_calls>"
@@ -124,6 +136,19 @@ class DSMLMarkupScannerTests(unittest.TestCase):
         self.assertEqual(parameter_tag.name, 'parameter')
         self.assertFalse(parameter_tag.closing)
 
+    def test_unseparated_suffixes_are_not_tool_tags(self) -> None:
+        cases = ['<reinvoke>', '<myparameter>', '<not_a_toolcalls>']
+
+        for text in cases:
+            with self.subTest(text=text):
+                self.assertIsNone(find_tool_markup_tag_outside_ignored(text))
+
+    def test_repeated_dsml_prefixes_are_normalised(self) -> None:
+        tag = find_tool_markup_tag_outside_ignored('<dsml-dsml-tool-calls>')
+
+        self.assertIsNotNone(tag)
+        self.assertEqual(tag.name, 'tool_calls')
+
     def test_plain_xml_closing_invoke(self) -> None:
         """</invoke> is recognised."""
         tag = find_tool_markup_tag_outside_ignored("</invoke>")
@@ -215,6 +240,8 @@ class DSMLMarkupScannerTests(unittest.TestCase):
             '<vendor_inv': 0,
             '<DSmartTool': 0,
             '<agent - param': 0,
+            '<dsml-dsml-tool': 0,
+            '<dsml-dsml-inv': 0,
             'prefix <abc|tool': 7,
         }
 
@@ -226,6 +253,7 @@ class DSMLMarkupScannerTests(unittest.TestCase):
         """'<div' is not a tool tag prefix — returns -1."""
         self.assertEqual(find_partial_tool_markup_start("<div"), -1)
         self.assertEqual(find_partial_tool_markup_start("</span"), -1)
+        self.assertEqual(find_partial_tool_markup_start("<not-a-tool"), -1)
 
     # ------------------------------------------------------------------
     # 3. Partial start avoided inside ignored regions
@@ -338,6 +366,127 @@ class DSMLMarkupScannerTests(unittest.TestCase):
         tag = find_tool_markup_tag_outside_ignored('<|DSML|parameter name="cmd">')
         self.assertIsNotNone(tag)
         self.assertEqual(tag.name, "parameter")
+
+
+class DSMLToolCallParserTests(unittest.TestCase):
+    def test_parses_standard_dsml_call(self) -> None:
+        text = '<|DSML|tool_calls><|DSML|invoke name="Read"><|DSML|parameter name="file_path"><![CDATA[README.md]]></|DSML|parameter></|DSML|invoke></|DSML|tool_calls>'
+
+        calls = parse_dsml_format(text, {"Read"})
+
+        self.assertEqual(calls, [{"name": "Read", "input": {"file_path": "README.md"}}])
+
+    def test_parses_multiple_legacy_xml_invokes(self) -> None:
+        text = '<tool_calls><invoke name="Read"><parameter name="file_path">README.md</parameter></invoke><invoke name="Bash"><parameter name="command">pwd</parameter></invoke></tool_calls>'
+
+        calls = parse_dsml_format(text, {"Read", "Bash"})
+
+        self.assertEqual(calls[0], {"name": "Read", "input": {"file_path": "README.md"}})
+        self.assertEqual(calls[1], {"name": "Bash", "input": {"command": "pwd"}})
+
+    def test_parses_drifted_fullwidth_dsml(self) -> None:
+        text = '<！DSML！tool_calls><！DSML！invoke name=“Bash”><！DSML！parameter name=“command”><！[CDATA[pwd]]><！/DSML！parameter><！/DSML！invoke><！/DSML！tool_calls>'
+
+        calls = parse_dsml_format(text, {"Bash"})
+
+        self.assertEqual(calls, [{"name": "Bash", "input": {"command": "pwd"}}])
+
+    def test_repairs_missing_opening_wrapper(self) -> None:
+        text = '<invoke name="Read"><parameter name="file_path">README.md</parameter></invoke></tool_calls>'
+
+        calls = parse_dsml_format(text, {"Read"})
+
+        self.assertEqual(calls, [{"name": "Read", "input": {"file_path": "README.md"}}])
+
+    def test_parses_nested_object_array_and_scalars(self) -> None:
+        text = '<tool_calls><invoke name="Ask"><parameter name="questions"><item><question>Proceed?</question><multiSelect>false</multiSelect></item></parameter><parameter name="count">2</parameter><parameter name="enabled">true</parameter><parameter name="empty"></parameter></invoke></tool_calls>'
+
+        calls = parse_dsml_format(text, {"Ask"})
+
+        self.assertEqual(calls[0]["name"], "Ask")
+        self.assertEqual(calls[0]["input"]["questions"][0]["question"], "Proceed?")
+        self.assertEqual(calls[0]["input"]["questions"][0]["multiSelect"], False)
+        self.assertEqual(calls[0]["input"]["count"], 2)
+        self.assertEqual(calls[0]["input"]["enabled"], True)
+        self.assertEqual(calls[0]["input"]["empty"], "")
+
+    def test_ignores_unknown_tool_name(self) -> None:
+        text = '<tool_calls><invoke name="Unknown"><parameter name="x">1</parameter></invoke></tool_calls>'
+
+        self.assertEqual(parse_dsml_format(text, {"Read"}), [])
+
+    def test_parses_prefixed_dsml_variants(self) -> None:
+        text = '<vendor_tool_calls><vendor-invoke name="Read"><agent - parameter name="file_path">README.md</agent - parameter></vendor-invoke></vendor_tool_calls>'
+
+        calls = parse_dsml_format(text, {"Read"})
+
+        self.assertEqual(calls, [{"name": "Read", "input": {"file_path": "README.md"}}])
+
+    def test_unescapes_entities(self) -> None:
+        text = '<tool_calls><invoke name="Echo"><parameter name="text">a &amp; b</parameter></invoke></tool_calls>'
+
+        calls = parse_dsml_format(text, {"Echo"})
+
+        self.assertEqual(calls, [{"name": "Echo", "input": {"text": "a & b"}}])
+
+    def test_cdata_preserves_entity_literals(self) -> None:
+        text = '<tool_calls><invoke name="Echo"><parameter name="text"><![CDATA[a &amp; b]]></parameter></invoke></tool_calls>'
+
+        calls = parse_dsml_format(text, {"Echo"})
+
+        self.assertEqual(calls, [{"name": "Echo", "input": {"text": "a &amp; b"}}])
+
+    def test_cdata_preserves_string_scalars_and_xml_literals(self) -> None:
+        text = '<tool_calls><invoke name="Echo"><parameter name="truth"><![CDATA[true]]></parameter><parameter name="count"><![CDATA[123]]></parameter><parameter name="nothing"><![CDATA[null]]></parameter><parameter name="html"><![CDATA[<tag>a</tag>]]></parameter></invoke></tool_calls>'
+
+        calls = parse_dsml_format(text, {"Echo"})
+
+        self.assertEqual(
+            calls,
+            [{
+                "name": "Echo",
+                "input": {
+                    "truth": "true",
+                    "count": "123",
+                    "nothing": "null",
+                    "html": "<tag>a</tag>",
+                },
+            }],
+        )
+
+    def test_cdata_preserves_surrounding_whitespace(self) -> None:
+        text = '<tool_calls><invoke name="Echo"><parameter name="content"><![CDATA[  line\n]]></parameter></invoke></tool_calls>'
+
+        calls = parse_dsml_format(text, {"Echo"})
+
+        self.assertEqual(calls, [{"name": "Echo", "input": {"content": "  line\n"}}])
+
+    def test_has_open_dsml_tool_tag_detects_incomplete_wrapper(self) -> None:
+        complete = '<tool_calls><invoke name="Read"></invoke></tool_calls>'
+
+        self.assertTrue(has_open_dsml_tool_tag('<tool_calls><invoke name="Read">'))
+        self.assertFalse(has_open_dsml_tool_tag(complete))
+
+    def test_consume_dsml_tool_capture_returns_prefix_calls_and_suffix(self) -> None:
+        captured = 'before <tool_calls><invoke name="Read"><parameter name="file_path">README.md</parameter></invoke></tool_calls> after'
+
+        prefix, calls, suffix, ready = consume_dsml_tool_capture(captured, {"Read"})
+
+        self.assertTrue(ready)
+        self.assertEqual(prefix, 'before ')
+        self.assertEqual(calls, [{"name": "Read", "input": {"file_path": "README.md"}}])
+        self.assertEqual(suffix, ' after')
+
+    def test_consume_dsml_tool_capture_holds_incomplete_wrapper(self) -> None:
+        prefix, calls, suffix, ready = consume_dsml_tool_capture(
+            '<tool_calls><invoke name="Read">',
+            {"Read"},
+        )
+
+        self.assertFalse(ready)
+        self.assertEqual(prefix, '')
+        self.assertEqual(calls, [])
+        self.assertEqual(suffix, '')
 
 
 if __name__ == "__main__":

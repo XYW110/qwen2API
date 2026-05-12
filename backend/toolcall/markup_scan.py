@@ -76,6 +76,7 @@ _CANONICAL_SUFFIXES: tuple[tuple[str, str], ...] = (
 )
 
 _DSML_NAME_PREFIX = '|DSML|'
+_DSML_CLOSE_NAME_PREFIX = '|/DSML|'
 _DSML_NAME_PREFIXES = tuple(
     _DSML_NAME_PREFIX[:i] for i in range(1, len(_DSML_NAME_PREFIX) + 1)
 )
@@ -90,43 +91,8 @@ def _compact_name(value: str) -> str:
     return ''.join(ch for ch in value.lower() if ch.isalnum())
 
 
-def _canonicalize_tag_name(raw_name: str) -> Optional[str]:
-    """Map a raw tag name to its canonical DSML form when recognised."""
-    token = raw_name.strip()
-    if not token:
-        return None
-
-    direct = _CANONICAL.get(token.lower())
-    if direct is not None:
-        return direct
-
-    compact = _compact_name(token)
-    for suffix, canonical in _CANONICAL_SUFFIXES:
-        if compact.endswith(suffix):
-            return canonical
-    return None
-
-
-def _count_alnum_groups(value: str) -> int:
-    """Count contiguous alphanumeric groups in *value*."""
-    count = 0
-    in_group = False
-    for ch in value:
-        if ch.isalnum():
-            if not in_group:
-                count += 1
-                in_group = True
-        else:
-            in_group = False
-    return count
-
-
-def _has_partial_canonical_suffix(raw_name: str) -> bool:
-    """Return True when *raw_name* could still grow into a tool tag name."""
-    token = raw_name.strip()
-    if not token:
-        return False
-
+def _candidate_name_starts(token: str) -> set[int]:
+    """Return positions where a canonical tag segment may begin."""
     starts = {0}
     for i in range(1, len(token)):
         current = token[i]
@@ -135,13 +101,60 @@ def _has_partial_canonical_suffix(raw_name: str) -> bool:
             continue
         if not previous.isalnum() or (current.isupper() and previous.islower()):
             starts.add(i)
+    return starts
 
-    for start in sorted(starts):
-        if start > 0 and _count_alnum_groups(token[:start]) > 1:
+
+def _alnum_groups(value: str) -> list[str]:
+    """Return contiguous alphanumeric groups in *value*."""
+    groups: list[str] = []
+    current: list[str] = []
+    for ch in value:
+        if ch.isalnum():
+            current.append(ch)
+        elif current:
+            groups.append(''.join(current))
+            current = []
+    if current:
+        groups.append(''.join(current))
+    return groups
+
+
+def _prefix_allows_canonical_suffix(value: str) -> bool:
+    """Return True when *value* is a safe prefix before a canonical tag."""
+    groups = _alnum_groups(value)
+    return len(groups) <= 1 or all(group.lower() == 'dsml' for group in groups)
+
+
+def _canonicalize_tag_name(raw_name: str) -> Optional[str]:
+    """Map a raw tag name to its canonical DSML form when recognised."""
+    token = raw_name.strip()
+    if not token:
+        return None
+
+    for start in sorted(_candidate_name_starts(token)):
+        if start > 0 and not _prefix_allows_canonical_suffix(token[:start]):
             continue
 
+        candidate = token[start:]
+        direct = _CANONICAL.get(candidate.lower())
+        if direct is not None:
+            return direct
+
+    return None
+
+
+def _has_partial_canonical_suffix(raw_name: str) -> bool:
+    """Return True when *raw_name* could still grow into a tool tag name."""
+    token = raw_name.strip()
+    if not token:
+        return False
+
+    for start in sorted(_candidate_name_starts(token)):
         compact = _compact_name(token[start:])
         if not compact:
+            continue
+
+        if start > 0 and not _prefix_allows_canonical_suffix(token[:start]):
             continue
 
         for suffix, _canonical in _CANONICAL_SUFFIXES:
@@ -298,7 +311,10 @@ def _parse_tag(text: str, pos: int) -> Optional[ToolMarkupTag]:
         idx += 1
 
     name_start = idx
-    if _fold(text[idx:idx + len(_DSML_NAME_PREFIX)]) == _DSML_NAME_PREFIX:
+    if _fold(text[idx:idx + len(_DSML_CLOSE_NAME_PREFIX)]) == _DSML_CLOSE_NAME_PREFIX:
+        is_closing = True
+        name_start += len(_DSML_CLOSE_NAME_PREFIX)
+    elif _fold(text[idx:idx + len(_DSML_NAME_PREFIX)]) == _DSML_NAME_PREFIX:
         name_start += len(_DSML_NAME_PREFIX)
     elif idx < len(text) and _fold(text[idx]) == '|':
         return None

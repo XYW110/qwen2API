@@ -26,7 +26,7 @@ class ToolCorePromptBuilderTests(unittest.TestCase):
         rendered = _extract_text(content, client_profile=CLAUDE_CODE_OPENAI_PROFILE)
 
         self.assertIn("look here", rendered)
-        self.assertIn('##TOOL_CALL##\n{"name": "Read", "input": {"file_path": "README.md"}}\n##END_CALL##', rendered)
+        self.assertIn('<|DSML|tool_calls>\n  <|DSML|invoke name="Read">\n    <|DSML|parameter name="file_path"><![CDATA[README.md]]></|DSML|parameter>\n  </|DSML|invoke>\n</|DSML|tool_calls>', rendered)
         self.assertIn("[Tool Result for call call_1]\ndone\n[/Tool Result]", rendered)
         self.assertIn("[Attachment file_id=file_1 filename=spec.md]", rendered)
         self.assertIn("[Attachment image file_id=img_1 mime=image/png]", rendered)

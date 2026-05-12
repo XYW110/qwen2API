@@ -1,6 +1,7 @@
 import unittest
 
 from backend.services.client_profiles import CLAUDE_CODE_OPENAI_PROFILE, OPENCLAW_OPENAI_PROFILE
+from backend.toolcall.formats_dsml import parse_dsml_format
 from backend.toolcore.prompt_contract import build_tool_instruction_block, normalize_prompt_tools, render_history_tool_call
 
 
@@ -23,7 +24,8 @@ class PromptContractTests(unittest.TestCase):
         )
 
         self.assertIn('MUST call the exact tool "Read"', contract)
-        self.assertIn("##TOOL_CALL##", contract)
+        self.assertIn("<|DSML|tool_calls>", contract)
+        self.assertNotIn("##TOOL_CALL##", contract)
 
     def test_none_tool_choice_suppresses_required_guidance(self) -> None:
         contract = build_tool_instruction_block(
@@ -35,9 +37,83 @@ class PromptContractTests(unittest.TestCase):
         self.assertIn("do NOT call any tool", contract)
         self.assertNotIn("MUST include at least one tool call", contract)
 
-    def test_history_tool_call_uses_canonical_wrapper_style(self) -> None:
+    def test_history_tool_call_uses_dsml_wrapper_style(self) -> None:
         rendered = render_history_tool_call("Read", {"file_path": "README.md"}, CLAUDE_CODE_OPENAI_PROFILE)
-        self.assertEqual(rendered, '##TOOL_CALL##\n{"name": "Read", "input": {"file_path": "README.md"}}\n##END_CALL##')
+        self.assertEqual(
+            rendered,
+            '<|DSML|tool_calls>\n  <|DSML|invoke name="Read">\n    <|DSML|parameter name="file_path"><![CDATA[README.md]]></|DSML|parameter>\n  </|DSML|invoke>\n</|DSML|tool_calls>',
+        )
+
+    def test_history_tool_call_renders_nested_values(self) -> None:
+        rendered = render_history_tool_call(
+            "Ask",
+            {
+                "questions": [{"question": "Proceed?", "multiSelect": False}],
+                "count": 2,
+                "empty": None,
+            },
+            OPENCLAW_OPENAI_PROFILE,
+        )
+
+        self.assertIn('<|DSML|parameter name="questions"><item><question><![CDATA[Proceed?]]></question><multiSelect>false</multiSelect></item></|DSML|parameter>', rendered)
+        self.assertIn('<|DSML|parameter name="count">2</|DSML|parameter>', rendered)
+        self.assertIn('<|DSML|parameter name="empty">null</|DSML|parameter>', rendered)
+
+    def test_history_tool_call_splits_cdata_end_marker(self) -> None:
+        rendered = render_history_tool_call("Write", {"content": "a]]>b"}, OPENCLAW_OPENAI_PROFILE)
+
+        self.assertIn("<![CDATA[a]]]]><![CDATA[>b]]>", rendered)
+        self.assertEqual(parse_dsml_format(rendered, {"Write"})[0]["input"], {"content": "a]]>b"})
+
+    def test_history_tool_call_preserves_cdata_entity_literals(self) -> None:
+        rendered = render_history_tool_call("Write", {"content": "a &amp; b &lt;tag&gt;"}, OPENCLAW_OPENAI_PROFILE)
+
+        self.assertEqual(
+            parse_dsml_format(rendered, {"Write"})[0]["input"],
+            {"content": "a &amp; b &lt;tag&gt;"},
+        )
+
+    def test_history_tool_call_preserves_cdata_string_scalars(self) -> None:
+        rendered = render_history_tool_call(
+            "Write",
+            {"truth": "true", "count": "123", "nothing": "null", "html": "<tag>a</tag>"},
+            OPENCLAW_OPENAI_PROFILE,
+        )
+
+        self.assertEqual(
+            parse_dsml_format(rendered, {"Write"})[0]["input"],
+            {"truth": "true", "count": "123", "nothing": "null", "html": "<tag>a</tag>"},
+        )
+
+    def test_history_tool_call_preserves_cdata_surrounding_whitespace(self) -> None:
+        rendered = render_history_tool_call("Write", {"content": "  line\n"}, OPENCLAW_OPENAI_PROFILE)
+
+        self.assertEqual(parse_dsml_format(rendered, {"Write"})[0]["input"], {"content": "  line\n"})
+
+    def test_history_tool_call_roundtrips_invalid_nested_keys_as_json(self) -> None:
+        rendered = render_history_tool_call(
+            "Store",
+            {"payload": {"bad key": "value", "1bad": True}},
+            OPENCLAW_OPENAI_PROFILE,
+        )
+
+        calls = parse_dsml_format(rendered, {"Store"})
+
+        self.assertEqual(calls, [{"name": "Store", "input": {"payload": {"bad key": "value", "1bad": True}}}])
+
+    def test_history_tool_call_roundtrips_empty_containers(self) -> None:
+        rendered = render_history_tool_call(
+            "Store",
+            {"items": [], "options": {}, "nested": {"items": [], "options": {}}},
+            OPENCLAW_OPENAI_PROFILE,
+        )
+
+        calls = parse_dsml_format(rendered, {"Store"})
+
+        self.assertEqual(
+            calls,
+            [{"name": "Store", "input": {"items": [], "options": {}, "nested": {"items": [], "options": {}}}}],
+        )
 
     def test_large_tool_list_preserves_client_declared_order(self) -> None:
         tools = normalize_prompt_tools(

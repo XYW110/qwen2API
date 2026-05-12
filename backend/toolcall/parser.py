@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 
 from backend.toolcall.fallback_textkv import parse_textkv_format
+from backend.toolcall.formats_dsml import parse_dsml_format
 from backend.toolcall.formats_json import parse_json_format
 from backend.toolcall.formats_xml import parse_xml_format
+from backend.toolcall.markup_scan import contains_tool_markup_syntax_outside_ignored
 
 
 def _has_top_level_json_tool_syntax(text: str) -> bool:
@@ -39,13 +41,16 @@ def _has_top_level_json_tool_syntax(text: str) -> bool:
 
 def _has_xml_like_tool_syntax(text: str) -> bool:
     lowered = text.lower()
-    return any(marker in lowered for marker in ("<invoke", "<tool_call", "</tool_call>"))
+    return contains_tool_markup_syntax_outside_ignored(text) or any(
+        marker in lowered for marker in ("<tool_call", "</tool_call>")
+    )
 
 
 def parse_tool_calls_detailed(text: str, allowed_names: set[str]) -> dict[str, object]:
     candidates = [
-        ("json", parse_json_format(text, allowed_names)),
+        ("dsml", parse_dsml_format(text, allowed_names)),
         ("xml", parse_xml_format(text, allowed_names)),
+        ("json", parse_json_format(text, allowed_names)),
         ("textkv", parse_textkv_format(text, allowed_names)),
     ]
 

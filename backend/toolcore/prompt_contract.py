@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import html
 import json
+import re
 from typing import Any
 
 from backend.services.client_profiles import (
@@ -33,9 +35,48 @@ def compact_history_tool_input(name: str, input_data: dict[str, Any], client_pro
     return compact
 
 
+def _cdata(value: str) -> str:
+    return "<![CDATA[" + value.replace("]]>", "]]]]><![CDATA[>") + "]]>"
+
+
+def _is_xmlish_name(value: str) -> bool:
+    return re.fullmatch(r"[A-Za-z_][A-Za-z0-9_:-]*", value) is not None
+
+
+def _render_dsml_value(value: Any) -> str:
+    if isinstance(value, str):
+        return _cdata(value)
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return "null"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, list):
+        if not value:
+            return _cdata("[]")
+        return "".join(f"<item>{_render_dsml_value(item)}</item>" for item in value)
+    if isinstance(value, dict):
+        if not value or not all(_is_xmlish_name(str(key)) for key in value):
+            return _cdata(json.dumps(value, ensure_ascii=False))
+        parts = []
+        for key, item in value.items():
+            safe_key = html.escape(str(key), quote=True)
+            parts.append(f"<{safe_key}>{_render_dsml_value(item)}</{safe_key}>")
+        return "".join(parts)
+    return _cdata(str(value))
+
+
 def render_history_tool_call(name: str, input_data: dict[str, Any], client_profile: str) -> str:
-    payload = json.dumps({"name": name, "input": compact_history_tool_input(name, input_data, client_profile)}, ensure_ascii=False)
-    return f"##TOOL_CALL##\n{payload}\n##END_CALL##"
+    compact = compact_history_tool_input(name, input_data, client_profile)
+    safe_name = html.escape(str(name), quote=True)
+    lines = ["<|DSML|tool_calls>", f'  <|DSML|invoke name="{safe_name}">']
+    for key, value in compact.items():
+        safe_key = html.escape(str(key), quote=True)
+        lines.append(f'    <|DSML|parameter name="{safe_key}">{_render_dsml_value(value)}</|DSML|parameter>')
+    lines.append("  </|DSML|invoke>")
+    lines.append("</|DSML|tool_calls>")
+    return "\n".join(lines)
 
 
 def normalize_prompt_tool(tool: dict[str, Any]) -> dict[str, Any]:
@@ -125,24 +166,26 @@ def build_tool_instruction_block(
         "IGNORE any previous output format instructions (needs-review, recap, etc.).",
         f"You have access to these tools: {', '.join(names)}",
         "",
-        "WHEN YOU NEED TO CALL A TOOL — output EXACTLY this format (nothing else):",
-        "##TOOL_CALL##",
-        '{"name": "EXACT_TOOL_NAME", "input": {"param1": "value1"}}',
-        "##END_CALL##",
+        "TOOL CALL FORMAT — FOLLOW EXACTLY:",
+        "<|DSML|tool_calls>",
+        '  <|DSML|invoke name="TOOL_NAME_HERE">',
+        '    <|DSML|parameter name="PARAMETER_NAME"><![CDATA[PARAMETER_VALUE]]></|DSML|parameter>',
+        "  </|DSML|invoke>",
+        "</|DSML|tool_calls>",
         "",
         "Rules:",
-        "- Output only the wrapper and JSON body.",
-        "- No prose before or after the wrapper.",
-        "- Use the exact tool name from the list above.",
-        "- Put arguments inside the input object.",
-        "- If no tool is needed, answer normally.",
-        "",
-        "CRITICAL — FORBIDDEN FORMATS (will be blocked by server):",
-        '- {"name": "X", "arguments": "..."}  <-- NEVER USE',
-        '- {"type": "function", "name": "X"}  <-- NEVER USE',
-        '- {"type": "tool_use", "name": "X"}  <-- NEVER USE',
-        '- <tool_call>{...}</tool_call>  <-- NEVER USE',
-        "ONLY ##TOOL_CALL##...##END_CALL## is accepted.",
+        "- Use one <|DSML|tool_calls> root when calling tools.",
+        "- Put one or more <|DSML|invoke> entries under the root.",
+        "- Use the exact tool name from the list above in the invoke name attribute.",
+        "- Every top-level argument must be a <|DSML|parameter name=\"ARG_NAME\"> node.",
+        "- Use <![CDATA[...]]> for string values, including code, paths, prompts, and file contents.",
+        "- Objects use nested XML elements inside the parameter body. Arrays may repeat <item> children.",
+        "- Numbers, booleans, and null stay plain text.",
+        "- Do not emit placeholder, blank, or whitespace-only parameters.",
+        "- If a required parameter value is unknown, ask the user or answer normally instead of outputting an empty tool call.",
+        "- Do NOT wrap XML in markdown fences. Do NOT output explanations, role markers, or internal monologue around the tool block.",
+        "- If you call a tool, the first non-whitespace characters of that tool block must be exactly <|DSML|tool_calls>.",
+        "- Compatibility note: legacy output formats may be parsed, but the model-facing format is DSML/XML only.",
         "",
         *force_constraint_lines,
         *([""] if force_constraint_lines else []),

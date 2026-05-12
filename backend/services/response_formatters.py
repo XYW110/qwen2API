@@ -5,6 +5,7 @@ import re
 from typing import Any
 
 from backend.runtime.execution import build_tool_directive
+from backend.toolcall.markup_scan import find_tool_markup_tag_outside_ignored
 from backend.toolcore.formatter import (
     build_canonical_anthropic_message,
     build_canonical_gemini_payload,
@@ -13,16 +14,27 @@ from backend.toolcore.formatter import (
 )
 
 
+def _first_dsml_tool_markup_index(text: str) -> int:
+    tag = find_tool_markup_tag_outside_ignored(text, 0)
+    while tag is not None:
+        if tag.name in {"tool_calls", "invoke"}:
+            return tag.start
+        tag = find_tool_markup_tag_outside_ignored(text, tag.end)
+    return -1
+
+
 def sanitize_visible_answer_text(answer_text: str, *, tool_use: bool) -> str:
     text = answer_text or ""
     if not tool_use or not text:
         return text
     text = re.sub(r"(?im)^Tool\s+[A-Za-z0-9_.:-]+\s+does not exists?\.?\s*", "", text).strip()
-    markers = [marker for marker in ("##TOOL_CALL##", "<tool_call>") if marker in text]
-    if not markers:
+    positions = [text.index(marker) for marker in ("##TOOL_CALL##", "<tool_call>") if marker in text]
+    dsml_index = _first_dsml_tool_markup_index(text)
+    if dsml_index >= 0:
+        positions.append(dsml_index)
+    if not positions:
         return text
-    first_index = min(text.index(marker) for marker in markers)
-    return text[:first_index].strip()
+    return text[:min(positions)].strip()
 
 
 def build_openai_completion_payload(*, completion_id: str, created: int, model_name: str, prompt: str, execution, standard_request) -> dict[str, Any]:
