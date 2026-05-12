@@ -6,8 +6,8 @@ from backend.services.client_profiles import CLAUDE_CODE_OPENAI_PROFILE, OPENCLA
 from backend.toolcore.prompt_builder import messages_to_prompt
 
 
-class OpenClawPromptPollutionRegressionTest(unittest.TestCase):
-    def test_short_opencode_system_prompt_is_removed(self) -> None:
+class ClientPresetPromptRegressionTest(unittest.TestCase):
+    def test_short_opencode_system_prompt_is_preserved_as_client_preset(self) -> None:
         result = messages_to_prompt(
             {
                 "messages": [
@@ -18,11 +18,10 @@ class OpenClawPromptPollutionRegressionTest(unittest.TestCase):
             client_profile=OPENCLAW_OPENAI_PROFILE,
         )
 
-        self.assertNotIn("You are opencode", result.prompt)
-        self.assertNotIn("System: You are opencode", result.prompt)
+        self.assertIn("<system>\nYou are opencode, an AI coding agent.\n</system>", result.prompt)
         self.assertIn("Human: Explain decorators in Python.", result.prompt)
 
-    def test_openclaw_runtime_native_tools_are_not_rendered_upstream(self) -> None:
+    def test_openclaw_runtime_native_tools_are_rendered_when_declared_by_client(self) -> None:
         result = messages_to_prompt(
             {
                 "messages": [
@@ -62,13 +61,12 @@ class OpenClawPromptPollutionRegressionTest(unittest.TestCase):
             client_profile=OPENCLAW_OPENAI_PROFILE,
         )
 
-        self.assertFalse(result.tool_enabled)
-        self.assertEqual([], result.tools)
-        self.assertNotIn("MANDATORY TOOL CALL INSTRUCTIONS", result.prompt)
-        self.assertNotIn("OPENCODE TOOL FORMAT OVERRIDE", result.prompt)
-        self.assertNotIn("You have access to these tools: Read, Bash", result.prompt)
+        self.assertTrue(result.tool_enabled)
+        self.assertEqual(["Read", "Bash"], [tool.get("name") for tool in result.tools])
+        self.assertIn("MANDATORY TOOL CALL INSTRUCTIONS", result.prompt)
+        self.assertIn("You have access to these tools: Read, Bash", result.prompt)
 
-    def test_claude_code_runtime_native_tools_are_not_rendered_upstream(self) -> None:
+    def test_claude_code_runtime_native_tools_are_rendered_when_declared_by_client(self) -> None:
         result = messages_to_prompt(
             {
                 "messages": [
@@ -105,10 +103,10 @@ class OpenClawPromptPollutionRegressionTest(unittest.TestCase):
             client_profile=CLAUDE_CODE_OPENAI_PROFILE,
         )
 
-        self.assertFalse(result.tool_enabled)
-        self.assertEqual([], result.tools)
-        self.assertNotIn("MANDATORY TOOL CALL INSTRUCTIONS", result.prompt)
-        self.assertNotIn("You have access to these tools: Read, Bash", result.prompt)
+        self.assertTrue(result.tool_enabled)
+        self.assertEqual(["Read", "Bash"], [tool.get("name") for tool in result.tools])
+        self.assertIn("MANDATORY TOOL CALL INSTRUCTIONS", result.prompt)
+        self.assertIn("You have access to these tools: Read, Bash", result.prompt)
 
     def test_regular_client_function_tools_are_preserved(self) -> None:
         result = messages_to_prompt(

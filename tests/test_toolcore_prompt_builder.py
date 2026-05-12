@@ -1,6 +1,6 @@
 import unittest
 
-from backend.services.client_profiles import CLAUDE_CODE_OPENAI_PROFILE, OPENCLAW_OPENAI_PROFILE
+from backend.services.client_profiles import CLAUDE_CODE_OPENAI_PROFILE, OPENCLAW_OPENAI_PROFILE, QWEN_CODE_OPENAI_PROFILE
 from backend.toolcore.prompt_builder import _extract_text, _extract_user_text_only, messages_to_prompt
 
 
@@ -68,7 +68,7 @@ class ToolCorePromptBuilderTests(unittest.TestCase):
         self.assertIn("Human (CURRENT TASK - TOP PRIORITY): Now inspect README.md", result.prompt)
         self.assertTrue(result.prompt.endswith("Assistant:"))
 
-    def test_messages_to_prompt_strips_agent_runtime_system_prose(self) -> None:
+    def test_messages_to_prompt_preserves_openclaw_runtime_system_prose(self) -> None:
         req_data = {
             "system": "You are a personal assistant running inside OpenClaw.\n## Tooling\nTool availability (filtered by policy):\n- read: Read file contents\n- write: Create or overwrite files",
             "messages": [
@@ -85,50 +85,76 @@ class ToolCorePromptBuilderTests(unittest.TestCase):
 
         result = messages_to_prompt(req_data, client_profile=OPENCLAW_OPENAI_PROFILE)
 
-        self.assertNotIn("running inside OpenClaw", result.prompt)
-        self.assertNotIn("Tool availability (filtered by policy)", result.prompt)
+        self.assertIn("running inside OpenClaw", result.prompt)
+        self.assertIn("Tool availability (filtered by policy)", result.prompt)
         self.assertIn("=== MANDATORY TOOL CALL INSTRUCTIONS ===", result.prompt)
         self.assertIn("Human (CURRENT TASK - TOP PRIORITY): Find the target file and explain it", result.prompt)
 
-    def test_messages_to_prompt_strips_opencode_runtime_system_prose(self) -> None:
+    def test_messages_to_prompt_preserves_claude_code_system_prose_with_tools(self) -> None:
         req_data = {
-            "system": "You are a personal assistant running inside SomeAgent.\n## Tooling\nTool availability (filtered by policy):\n- read: Read file contents",
+            "system": "You are Claude Code, Anthropic's official CLI for Claude.\nTool availability (filtered by policy): Read, Bash.",
             "messages": [
                 {"role": "user", "content": "Summarize the repository layout"},
             ],
             "tools": [
                 {
-                    "name": "read",
+                    "name": "Read",
                     "description": "Read file contents",
-                    "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
+                    "parameters": {"type": "object", "properties": {"file_path": {"type": "string"}}},
                 }
             ],
         }
 
         result = messages_to_prompt(req_data, client_profile=CLAUDE_CODE_OPENAI_PROFILE)
 
-        self.assertNotIn("running inside SomeAgent", result.prompt)
-        self.assertNotIn("Tool availability (filtered by policy)", result.prompt)
+        self.assertIn("You are Claude Code", result.prompt)
+        self.assertIn("Tool availability (filtered by policy): Read, Bash.", result.prompt)
         self.assertIn("=== MANDATORY TOOL CALL INSTRUCTIONS ===", result.prompt)
 
-    def test_messages_to_prompt_keeps_normal_system_prompt(self) -> None:
+    def test_messages_to_prompt_preserves_message_role_system_prompt_with_tool_markers(self) -> None:
         req_data = {
-            "system": "You are a careful code reviewer.",
             "messages": [
+                {
+                    "role": "system",
+                    "content": "You are opencode, an AI coding agent.\nTool availability (filtered by policy): Read, Bash.",
+                },
                 {"role": "user", "content": "Review this diff"},
             ],
             "tools": [
                 {
-                    "name": "read",
+                    "name": "Read",
                     "description": "Read file contents",
-                    "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
+                    "parameters": {"type": "object", "properties": {"file_path": {"type": "string"}}},
                 }
             ],
         }
 
         result = messages_to_prompt(req_data, client_profile=OPENCLAW_OPENAI_PROFILE)
 
-        self.assertIn("<system>\nYou are a careful code reviewer.\n</system>", result.prompt)
+        self.assertIn("You are opencode, an AI coding agent.", result.prompt)
+        self.assertIn("Tool availability (filtered by policy): Read, Bash.", result.prompt)
+        self.assertIn("=== MANDATORY TOOL CALL INSTRUCTIONS ===", result.prompt)
+
+    def test_messages_to_prompt_preserves_qwen_code_system_prose_with_tools(self) -> None:
+        req_data = {
+            "system": "You are Qwen Code, a coding assistant.\nTool availability (filtered by policy): read_file, write_file, run_shell_command.",
+            "messages": [
+                {"role": "user", "content": "Review this diff"},
+            ],
+            "tools": [
+                {
+                    "name": "read_file",
+                    "description": "Read file contents",
+                    "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
+                }
+            ],
+        }
+
+        result = messages_to_prompt(req_data, client_profile=QWEN_CODE_OPENAI_PROFILE)
+
+        self.assertIn("You are Qwen Code", result.prompt)
+        self.assertIn("Tool availability (filtered by policy): read_file, write_file, run_shell_command.", result.prompt)
+        self.assertIn("=== MANDATORY TOOL CALL INSTRUCTIONS ===", result.prompt)
 
     def test_messages_to_prompt_strips_agent_runtime_assistant_history(self) -> None:
         req_data = {

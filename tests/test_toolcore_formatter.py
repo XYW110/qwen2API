@@ -6,6 +6,7 @@ from backend.toolcore.formatter import (
     build_canonical_openai_chat_payload,
     build_canonical_openai_responses_payload,
 )
+from backend.services.token_calc import calculate_usage, count_tokens
 
 
 class ToolCoreFormatterTests(unittest.TestCase):
@@ -54,6 +55,58 @@ class ToolCoreFormatterTests(unittest.TestCase):
         payload = build_canonical_gemini_payload(answer_text="hello")
 
         self.assertEqual(payload["candidates"][0]["content"]["parts"][0]["text"], "hello")
+
+    def test_openai_chat_formatter_reports_token_usage(self) -> None:
+        prompt = "hello world hello world hello world"
+        answer_text = "I will review the project structure first."
+        payload = build_canonical_openai_chat_payload(
+            completion_id="chatcmpl_usage",
+            created=1,
+            model_name="gpt-4.1",
+            prompt=prompt,
+            answer_text=answer_text,
+            reasoning_text="",
+            directives=[],
+        )
+
+        self.assertEqual(payload["usage"], calculate_usage(prompt, answer_text))
+        self.assertNotEqual(payload["usage"]["prompt_tokens"], len(prompt))
+
+    def test_openai_responses_formatter_reports_token_usage(self) -> None:
+        prompt = "The quick brown fox jumps over the lazy dog."
+        answer_text = "The logs show success, but latency is higher than expected."
+        reasoning_text = "Check the status code first, then inspect latency."
+        payload = build_canonical_openai_responses_payload(
+            response_id="resp_usage",
+            created=1,
+            model_name="gpt-4.1",
+            prompt=prompt,
+            answer_text=answer_text,
+            reasoning_text=reasoning_text,
+            directives=[],
+        )
+
+        self.assertEqual(payload["usage"]["input_tokens"], count_tokens(prompt))
+        self.assertEqual(payload["usage"]["output_tokens"], count_tokens(answer_text))
+        self.assertEqual(payload["usage"]["total_tokens"], count_tokens(prompt) + count_tokens(answer_text))
+        self.assertEqual(payload["usage"]["output_tokens_details"]["reasoning_tokens"], count_tokens(reasoning_text))
+        self.assertNotEqual(payload["usage"]["input_tokens"], len(prompt))
+
+    def test_anthropic_formatter_reports_token_usage(self) -> None:
+        prompt = "hello world hello world hello world"
+        answer_text = "I will keep the answer concise."
+        payload = build_canonical_anthropic_message(
+            msg_id="msg_usage",
+            model_name="claude-3-5-sonnet",
+            prompt=prompt,
+            answer_text=answer_text,
+            reasoning_text="",
+            directives=[],
+        )
+
+        self.assertEqual(payload["usage"]["input_tokens"], count_tokens(prompt))
+        self.assertEqual(payload["usage"]["output_tokens"], count_tokens(answer_text))
+        self.assertNotEqual(payload["usage"]["input_tokens"], len(prompt))
 
 
 if __name__ == "__main__":

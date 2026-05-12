@@ -208,14 +208,9 @@ def is_agent_runtime_prose(text: str, role: str) -> bool:
     return False
 
 
-def sanitize_runtime_prompt_text(text: str, role: str) -> str:
+def sanitize_runtime_prompt_text(text: str, _role: str) -> str:
     if not isinstance(text, str):
         return ""
-    if role == "system":
-        if is_agent_runtime_prose(text, role):
-            return ""
-        if looks_like_opencode_system_prompt(text):
-            return ""
     return text
 
 
@@ -238,23 +233,33 @@ def extract_user_text_only(content: Any, client_profile: str = OPENCLAW_OPENAI_P
 
 
 def extract_system_prompt(req_data: dict[str, Any], *, client_profile: str = OPENCLAW_OPENAI_PROFILE) -> str:
+    del client_profile
     system_prompt = ""
     sys_field = req_data.get("system", "")
     if isinstance(sys_field, list):
         system_prompt = " ".join(
-            part.get("text", "")
+            sanitize_runtime_prompt_text(part.get("text", ""), "system")
             for part in sys_field
             if isinstance(part, dict)
         )
     elif isinstance(sys_field, str):
-        system_prompt = sys_field
+        system_prompt = sanitize_runtime_prompt_text(sys_field, "system")
 
     if system_prompt:
         return system_prompt
 
     for msg in req_data.get("messages", []) or []:
-        if msg.get("role") == "system":
-            return extract_user_text_only(msg.get("content", ""), client_profile=client_profile)
+        if msg.get("role") != "system":
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            return sanitize_runtime_prompt_text(content, "system")
+        if isinstance(content, list):
+            return "\n".join(
+                sanitize_runtime_prompt_text(part.get("text", ""), "system")
+                for part in content
+                if isinstance(part, dict) and part.get("type", "") == "text"
+            )
     return ""
 
 

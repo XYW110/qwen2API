@@ -9,6 +9,7 @@ from backend.services.client_profiles import (
     CLAUDE_CODE_OPENAI_PROFILE,
     OPENCLAW_OPENAI_PROFILE,
     QWEN_CODE_OPENAI_PROFILE,
+    extract_system_prompt,
     sanitize_runtime_prompt_text,
     looks_like_opencode_system_prompt,
     sanitize_openclaw_user_text,
@@ -20,31 +21,6 @@ from backend.toolcore.prompt_contract import (
 )
 
 log = logging.getLogger("qwen2api.prompt")
-
-AGENT_RUNTIME_NATIVE_TOOL_NAMES = frozenset(
-    {
-        "bash",
-        "edit",
-        "glob",
-        "grep",
-        "ls",
-        "multiedit",
-        "notebookedit",
-        "read",
-        "task",
-        "todowrite",
-        "webfetch",
-        "write",
-    }
-)
-
-AGENT_RUNTIME_NATIVE_TOOL_PROFILES = frozenset(
-    {
-        CLAUDE_CODE_OPENAI_PROFILE,
-        OPENCLAW_OPENAI_PROFILE,
-    }
-)
-
 
 @dataclass(slots=True)
 class PromptBuildResult:
@@ -94,6 +70,21 @@ def _extract_user_text_only(content, client_profile: str = OPENCLAW_OPENAI_PROFI
             block_text = part.get("text", "")
             if client_profile == OPENCLAW_OPENAI_PROFILE:
                 block_text = _sanitize_openclaw_user_text(block_text)
+            if block_text:
+                text_blocks.append(block_text)
+        return "\n".join(text_blocks)
+    return ""
+
+
+def _extract_system_text_only(content) -> str:
+    if isinstance(content, str):
+        return sanitize_runtime_prompt_text(content, "system")
+    if isinstance(content, list):
+        text_blocks = []
+        for part in content:
+            if not isinstance(part, dict) or part.get("type", "") != "text":
+                continue
+            block_text = sanitize_runtime_prompt_text(part.get("text", ""), "system")
             if block_text:
                 text_blocks.append(block_text)
         return "\n".join(text_blocks)
@@ -156,14 +147,6 @@ def _is_heavy_tool_profile(client_profile: str) -> bool:
     return client_profile in {CLAUDE_CODE_OPENAI_PROFILE, QWEN_CODE_OPENAI_PROFILE}
 
 
-def _filter_agent_runtime_native_tools(tools: list[dict]) -> list[dict]:
-    return [
-        tool
-        for tool in tools
-        if str(tool.get("name", "")).strip().lower() not in AGENT_RUNTIME_NATIVE_TOOL_NAMES
-    ]
-
-
 def build_prompt_with_tools(
     system_prompt: str,
     messages: list,
@@ -174,7 +157,7 @@ def build_prompt_with_tools(
     required_tool_name: str | None = None,
 ) -> str:
     max_chars = 24000 if (tools and client_profile == QWEN_CODE_OPENAI_PROFILE) else (18000 if tools else 120000)
-    sys_part = "" if tools and _is_heavy_tool_profile(client_profile) else (f"<system>\n{system_prompt[:2000]}\n</system>" if system_prompt else "")
+    sys_part = f"<system>\n{system_prompt[:2000]}\n</system>" if system_prompt else ""
     tools_part = ""
     if tools:
         tools_part = build_tool_instruction_block(
@@ -213,7 +196,7 @@ def build_prompt_with_tools(
         role = msg.get("role", "")
         if role not in ("user", "assistant", "system", "tool"):
             continue
-        if role == "system" and system_prompt and _extract_text(msg.get("content", ""), client_profile=client_profile).strip() == system_prompt.strip():
+        if role == "system" and system_prompt and _extract_system_text_only(msg.get("content", "")).strip() == system_prompt.strip():
             continue
 
         if role == "tool":
@@ -242,11 +225,14 @@ def build_prompt_with_tools(
             continue
 
         user_text_only = _extract_user_text_only(msg.get("content", ""), client_profile=client_profile) if role == "user" else ""
-        text = _extract_text(
-            msg.get("content", ""),
-            user_tool_mode=(bool(tools) and role == "user" and _is_heavy_tool_profile(client_profile)),
-            client_profile=client_profile,
-        )
+        if role == "system":
+            text = _extract_system_text_only(msg.get("content", ""))
+        else:
+            text = _extract_text(
+                msg.get("content", ""),
+                user_tool_mode=(bool(tools) and role == "user" and _is_heavy_tool_profile(client_profile)),
+                client_profile=client_profile,
+            )
 
         if role == "assistant" and not text and msg.get("tool_calls"):
             tc_parts = []
@@ -392,22 +378,9 @@ def messages_to_prompt(req_data: dict, *, client_profile: str = OPENCLAW_OPENAI_
         )
         messages.append(sanitized_message)
     tools = normalize_prompt_tools(req_data.get("tools", []))
-    if resolved_client_profile in AGENT_RUNTIME_NATIVE_TOOL_PROFILES:
-        tools = _filter_agent_runtime_native_tools(tools)
     tool_enabled = bool(tools)
     tool_choice = normalize_tool_choice(req_data.get("tool_choice"))
-    system_prompt = ""
-    sys_field = req_data.get("system", "")
-    if isinstance(sys_field, list):
-        system_prompt = " ".join(part.get("text", "") for part in sys_field if isinstance(part, dict))
-    elif isinstance(sys_field, str):
-        system_prompt = sys_field
-    system_prompt = sanitize_runtime_prompt_text(system_prompt, "system")
-    if not system_prompt:
-        for message in messages:
-            if message.get("role") == "system":
-                system_prompt = _extract_text(message.get("content", ""), client_profile=resolved_client_profile)
-                break
+    system_prompt = extract_system_prompt(req_data, client_profile=resolved_client_profile)
     return PromptBuildResult(
         prompt=build_prompt_with_tools(
             system_prompt,

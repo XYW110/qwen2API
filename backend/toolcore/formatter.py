@@ -4,6 +4,8 @@ import json
 import uuid
 from typing import Any
 
+from backend.services.token_calc import calculate_usage, count_tokens
+
 
 def build_canonical_openai_chat_payload(*, completion_id: str, created: int, model_name: str, prompt: str, answer_text: str, reasoning_text: str, directives: list[dict[str, Any]]) -> dict[str, Any]:
     del reasoning_text
@@ -34,11 +36,7 @@ def build_canonical_openai_chat_payload(*, completion_id: str, created: int, mod
         "created": created,
         "model": model_name,
         "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
-        "usage": {
-            "prompt_tokens": len(prompt),
-            "completion_tokens": len(answer_text),
-            "total_tokens": len(prompt) + len(answer_text),
-        },
+        "usage": calculate_usage(prompt, answer_text),
     }
 
 
@@ -77,6 +75,8 @@ def build_canonical_openai_responses_payload(*, response_id: str, created: int, 
                 "content": [{"type": "output_text", "text": answer_text, "annotations": []}],
             }
         )
+    input_tokens = count_tokens(prompt)
+    output_tokens = count_tokens(answer_text)
     return {
         "id": response_id,
         "object": "response",
@@ -86,10 +86,10 @@ def build_canonical_openai_responses_payload(*, response_id: str, created: int, 
         "output": output,
         "output_text": answer_text,
         "usage": {
-            "input_tokens": len(prompt),
-            "output_tokens": len(answer_text),
-            "total_tokens": len(prompt) + len(answer_text),
-            "output_tokens_details": {"reasoning_tokens": len(reasoning_text)},
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+            "output_tokens_details": {"reasoning_tokens": count_tokens(reasoning_text)},
         },
     }
 
@@ -107,7 +107,7 @@ def build_canonical_anthropic_message(*, msg_id: str, model_name: str, prompt: s
         "content": content_blocks,
         "stop_reason": "tool_use" if any(block.get("type") == "tool_use" for block in directives) else "end_turn",
         "stop_sequence": None,
-        "usage": {"input_tokens": len(prompt), "output_tokens": len(answer_text)},
+        "usage": {"input_tokens": count_tokens(prompt), "output_tokens": count_tokens(answer_text)},
     }
 
 
