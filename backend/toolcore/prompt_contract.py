@@ -162,8 +162,8 @@ def build_tool_instruction_block(
 
     lines = [
         "=== MANDATORY TOOL CALL INSTRUCTIONS ===",
-        "【重要】用户输入什么语言，就用什么语言回复。User inputs Chinese → respond in Chinese. User inputs English → respond in English.",
-        "IGNORE any previous output format instructions (needs-review, recap, etc.).",
+        "This gateway-injected block only defines how to serialize tool calls for the bridge.",
+        "Follow the client's system/developer instructions for persona, style, language, and normal response format.",
         f"You have access to these tools: {', '.join(names)}",
         "",
         "TOOL CALL FORMAT — FOLLOW EXACTLY:",

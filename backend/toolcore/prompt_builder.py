@@ -367,9 +367,9 @@ def build_prompt_with_tools(
         parts.append(tools_part)
     if sys_part:
         parts.append(sys_part)
-    parts.extend(history_parts)
     if tools_part and not opencode_override:
         parts.append(tools_part)
+    parts.extend(history_parts)
     if latest_user_line:
         parts.append(latest_user_line)
     parts.append("Assistant:")

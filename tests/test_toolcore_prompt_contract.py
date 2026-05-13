@@ -37,6 +37,16 @@ class PromptContractTests(unittest.TestCase):
         self.assertIn("do NOT call any tool", contract)
         self.assertNotIn("MUST include at least one tool call", contract)
 
+    def test_tool_contract_does_not_override_client_persona_or_language(self) -> None:
+        contract = build_tool_instruction_block(
+            normalize_prompt_tools([{"name": "Read", "description": "Read file", "parameters": {}}]),
+            OPENCLAW_OPENAI_PROFILE,
+        )
+
+        self.assertIn("only defines how to serialize tool calls", contract)
+        self.assertNotIn("IGNORE any previous output format instructions", contract)
+        self.assertNotIn("用户输入什么语言", contract)
+
     def test_history_tool_call_uses_dsml_wrapper_style(self) -> None:
         rendered = render_history_tool_call("Read", {"file_path": "README.md"}, CLAUDE_CODE_OPENAI_PROFILE)
         self.assertEqual(

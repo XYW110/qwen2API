@@ -42,6 +42,24 @@ class ToolCorePromptBuilderTests(unittest.TestCase):
             "latest instruction",
         )
 
+    def test_messages_to_prompt_places_gateway_tool_contract_before_user_history(self) -> None:
+        req_data = {
+            "system": "Always answer as a pirate captain.",
+            "messages": [{"role": "user", "content": "Who are you?"}],
+            "tools": [
+                {
+                    "name": "read",
+                    "description": "Read file contents",
+                    "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
+                }
+            ],
+        }
+
+        result = messages_to_prompt(req_data, client_profile=OPENCLAW_OPENAI_PROFILE)
+
+        self.assertLess(result.prompt.index("=== MANDATORY TOOL CALL INSTRUCTIONS ==="), result.prompt.index("Human: Who are you?"))
+        self.assertLess(result.prompt.index("Always answer as a pirate captain."), result.prompt.index("=== MANDATORY TOOL CALL INSTRUCTIONS ==="))
+
     def test_messages_to_prompt_preserves_required_tool_and_current_task(self) -> None:
         req_data = {
             "system": "You are helpful",
