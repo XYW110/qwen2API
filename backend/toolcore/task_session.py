@@ -33,12 +33,16 @@ class PersistentSessionPlan:
     new_entries_count: int = 0
 
 
-def should_use_persistent_tool_session(request: StandardRequest) -> bool:  # noqa: ARG001
-    return False
+def should_use_persistent_tool_session(request: StandardRequest) -> bool:
+    return bool(getattr(request, 'session_key', None) and getattr(request, 'tools', None))
 
 
-def persistent_session_disabled_reason(request: StandardRequest) -> str:  # noqa: ARG001
-    return "session_reuse_disabled_globally"
+def persistent_session_disabled_reason(request: StandardRequest) -> str:
+    if not getattr(request, 'session_key', None):
+        return "missing_session_key"
+    if not getattr(request, 'tools', None):
+        return "no_tools"
+    return "session_reuse_disabled"
 
 
 def _preview_identifier(value: str | None, *, head: int = 8, tail: int = 6) -> str:

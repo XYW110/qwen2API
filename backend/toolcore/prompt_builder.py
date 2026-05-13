@@ -198,7 +198,7 @@ def build_prompt_with_tools(
     needs_review_markers = ("需求回显", "已了解规则", "等待用户输入", "待执行任务", "待确认事项", "[需求回显]", "**需求回显**")
     msg_count = 0
     max_history_msgs = (
-        16 if client_profile == QWEN_CODE_OPENAI_PROFILE else (12 if client_profile == CLAUDE_CODE_OPENAI_PROFILE else 8)
+        16 if client_profile == QWEN_CODE_OPENAI_PROFILE else (12 if client_profile == CLAUDE_CODE_OPENAI_PROFILE else 24)
     ) if tools else 200
     for msg in reversed(messages):
         if msg_count >= max_history_msgs:

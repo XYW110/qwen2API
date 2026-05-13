@@ -12,7 +12,8 @@ OPENCLAW_STARTUP_PATTERNS = (
     "A new session was started via /new or /reset.",
     "If runtime-provided startup context is included for this first turn",
 )
-OPENCLAW_UNTRUSTED_METADATA_PREFIX = "Sender (untrusted metadata):"
+UNTRUSTED_METADATA_PREFIXES = ("Sender (untrusted metadata):", "Conversation info (untrusted metadata):")
+OPENCLAW_UNTRUSTED_METADATA_PREFIX = UNTRUSTED_METADATA_PREFIXES[0]
 USER_ROLE_SYSTEM_PREFIXES = ("## Memory Recall", "## Compiled Wiki", "System:")
 OPENCODE_SYSTEM_PREFIX = "you are opencode"
 AGENT_RUNTIME_SYSTEM_MARKERS = (
@@ -210,6 +211,8 @@ def sanitize_openclaw_user_text(text: str) -> str:
             cleaned = match.group(1).strip()
         else:
             return ""
+    elif any(cleaned.startswith(prefix) for prefix in UNTRUSTED_METADATA_PREFIXES):
+        return ""
     lowered = cleaned.lower()
     if all(prefix in lowered for prefix in SKILL_BOOTSTRAP_PREFIXES) and "<available_skills>" in lowered:
         cleaned = re.sub(r"(?is)^.*?</available_skills>\s*", "", cleaned).strip()

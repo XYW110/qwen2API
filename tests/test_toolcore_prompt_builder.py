@@ -321,6 +321,52 @@ class ToolCorePromptBuilderTests(unittest.TestCase):
         self.assertNotIn("agent-orchestrator", result.prompt)
         self.assertIn("请阅读本地脚本并解释它如何抓取限免信息", result.prompt)
 
+    def test_messages_to_prompt_skips_untrusted_metadata_as_latest_task(self) -> None:
+        req_data = {
+            "messages": [
+                {"role": "user", "content": "上一条我说了什么？"},
+                {"role": "assistant", "content": "你上一条问的是天气。"},
+                {
+                    "role": "user",
+                    "content": "Conversation info (untrusted metadata):\n```json\n{\"chat_id\": \"wechat:telphy\"}\n```",
+                },
+            ],
+            "tools": [
+                {
+                    "name": "read",
+                    "description": "Read file contents",
+                    "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
+                }
+            ],
+        }
+
+        result = messages_to_prompt(req_data, client_profile=OPENCLAW_OPENAI_PROFILE)
+
+        self.assertNotIn("CURRENT TASK - TOP PRIORITY): Conversation info", result.prompt)
+        self.assertIn("Human (CURRENT TASK - TOP PRIORITY): 上一条我说了什么？", result.prompt)
+
+    def test_messages_to_prompt_keeps_more_openclaw_tool_history(self) -> None:
+        messages = []
+        for index in range(1, 7):
+            messages.append({"role": "user", "content": f"用户上下文 {index}"})
+            messages.append({"role": "assistant", "content": f"助手回复 {index}"})
+        messages.append({"role": "user", "content": "现在总结前面的上下文"})
+        req_data = {
+            "messages": messages,
+            "tools": [
+                {
+                    "name": "read",
+                    "description": "Read file contents",
+                    "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
+                }
+            ],
+        }
+
+        result = messages_to_prompt(req_data, client_profile=OPENCLAW_OPENAI_PROFILE)
+
+        self.assertIn("Assistant: 助手回复 1", result.prompt)
+        self.assertIn("Human (CURRENT TASK - TOP PRIORITY): 现在总结前面的上下文", result.prompt)
+
 
 if __name__ == "__main__":
     unittest.main()
