@@ -189,6 +189,56 @@ class ContextAttachmentPreparationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Always answer as a pirate captain.", saved_texts[0])
         self.assertIn("Who are you?", saved_texts[0])
 
+    async def test_generated_context_falls_back_inline_when_no_account_available(self) -> None:
+        app = SimpleNamespace(state=SimpleNamespace(
+            context_offloader=ContextOffloader(SimpleNamespace(
+                CONTEXT_INLINE_MAX_CHARS=80,
+                CONTEXT_FORCE_FILE_MAX_CHARS=160,
+                CONTEXT_ATTACHMENT_TTL_SECONDS=600,
+            )),
+            account_pool=SimpleNamespace(
+                acquire_wait_preferred=AsyncMock(return_value=None),
+                release=lambda _acc: None,
+            ),
+            file_store=SimpleNamespace(
+                save_text=AsyncMock(),
+                delete_path=AsyncMock(),
+            ),
+            session_affinity=SimpleNamespace(
+                get=AsyncMock(return_value=None),
+                bind_account=AsyncMock(),
+                add_uploaded_file=AsyncMock(),
+            ),
+            upstream_file_cache=SimpleNamespace(
+                get=AsyncMock(return_value=None),
+                set=AsyncMock(),
+            ),
+            upstream_file_uploader=SimpleNamespace(upload_local_file=AsyncMock()),
+        ))
+        payload = {
+            "model": "gpt-4.1",
+            "system": "system context\n" + "runtime line\n" * 20,
+            "messages": [{"role": "user", "content": "Who are you?"}],
+            "tools": [{"name": "read", "description": "Read file contents", "parameters": {}}],
+            "upstream_files": [{"file_id": "existing-file"}],
+        }
+
+        result = await prepare_context_attachments(
+            app=app,
+            payload=payload,
+            surface="openai",
+            auth_token="tok",
+            client_profile="openclaw_openai",
+        )
+
+        self.assertEqual(result["context_mode"], "inline")
+        self.assertTrue(result["attachment_fallback"])
+        self.assertEqual(result["upstream_files"], [{"file_id": "existing-file"}])
+        self.assertIsNone(result["bound_account"])
+        self.assertIn("system context", result["payload"]["messages"][0]["content"])
+        app.state.session_affinity.bind_account.assert_not_awaited()
+        app.state.file_store.save_text.assert_not_awaited()
+
 
 if __name__ == "__main__":
     unittest.main()

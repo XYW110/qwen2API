@@ -83,6 +83,41 @@ def _generated_context_filename(ext: str) -> str:
     return f"{uuid.uuid4().hex}.{ext}"
 
 
+def _fallback_context_attachment_result(
+    *,
+    payload: dict[str, Any],
+    session_key: str,
+    plan,
+    use_generated_context_files: bool,
+    manual_attachments: list[Any],
+    fallback_message: str,
+) -> dict[str, Any]:
+    fallback_payload = dict(payload)
+    summary_parts: list[str] = []
+    if use_generated_context_files and plan.summary_text:
+        summary_parts.append(plan.summary_text[:1200])
+    if manual_attachments:
+        names = ", ".join(att.filename for att in manual_attachments[:4])
+        summary_parts.append(
+            f"User attachments were provided but attachment upload failed. Attachment names: {names}"
+        )
+    latest_text = summary_parts[0] if summary_parts else fallback_message
+    fallback_payload["messages"] = [{
+        "role": "user",
+        "content": f"{latest_text}\n\n{SYSTEM_CONTEXT_PROMPT_NOTE}"
+    }]
+    return {
+        "payload": fallback_payload,
+        "session_key": session_key,
+        "context_mode": "inline",
+        "upstream_files": list(payload.get("upstream_files", []) or []),
+        "bound_account": None,
+        "bound_account_email": None,
+        "generated_local_files": [],
+        "attachment_fallback": True,
+    }
+
+
 async def prepare_context_attachments(*, app, payload: dict[str, Any], surface: str, auth_token: str, client_profile: str, existing_attachments=None) -> dict[str, Any]:
     context_offloader = app.state.context_offloader
     account_pool = app.state.account_pool
@@ -114,7 +149,24 @@ async def prepare_context_attachments(*, app, payload: dict[str, Any], surface: 
     preferred_email = record.account_email if record else None
     acc = await account_pool.acquire_wait_preferred(preferred_email, timeout=60)
     if not acc:
-        raise RuntimeError("No available upstream account for context attachment mode")
+        log.warning(
+            "[ContextAttachment] no upstream account available; falling back inline session_key=%s surface=%s manual_attachments=%s generated_files=%s",
+            session_key,
+            surface,
+            [getattr(att, "filename", "") for att in manual_attachments],
+            [getattr(item, "ext", "") for item in getattr(plan, "generated_files", [])],
+        )
+        return _fallback_context_attachment_result(
+            payload=payload,
+            session_key=session_key,
+            plan=plan,
+            use_generated_context_files=use_generated_context_files,
+            manual_attachments=manual_attachments,
+            fallback_message=(
+                "No upstream account was available for attachment upload. "
+                "Continue with the available inline context only."
+            ),
+        )
     await affinity.bind_account(session_key, surface, acc.email, context_offloader.settings.CONTEXT_ATTACHMENT_TTL_SECONDS)
 
     upstream_files = list(payload.get("upstream_files", []) or [])
@@ -225,28 +277,14 @@ async def prepare_context_attachments(*, app, payload: dict[str, Any], surface: 
             exc,
         )
         account_pool.release(acc)
-        fallback_payload = dict(payload)
-        summary_parts: list[str] = []
-        if use_generated_context_files and plan.summary_text:
-            summary_parts.append(plan.summary_text[:1200])
-        if manual_attachments:
-            names = ", ".join(att.filename for att in manual_attachments[:4])
-            summary_parts.append(f"User attachments were provided but attachment upload failed. Attachment names: {names}")
-        latest_text = summary_parts[0] if summary_parts else "Attachment upload failed. Continue with the available inline context only."
-        fallback_payload["messages"] = [{
-            "role": "user",
-            "content": f"{latest_text}\n\n{SYSTEM_CONTEXT_PROMPT_NOTE}"
-        }]
-        return {
-            "payload": fallback_payload,
-            "session_key": session_key,
-            "context_mode": "inline",
-            "upstream_files": list(payload.get("upstream_files", []) or []),
-            "bound_account": None,
-            "bound_account_email": None,
-            "generated_local_files": [],
-            "attachment_fallback": True,
-        }
+        return _fallback_context_attachment_result(
+            payload=payload,
+            session_key=session_key,
+            plan=plan,
+            use_generated_context_files=use_generated_context_files,
+            manual_attachments=manual_attachments,
+            fallback_message="Attachment upload failed. Continue with the available inline context only.",
+        )
 
     rewritten = dict(payload)
     rewritten["messages"] = plan.inline_messages if use_generated_context_files else messages
