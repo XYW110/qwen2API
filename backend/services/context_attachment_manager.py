@@ -145,9 +145,13 @@ async def prepare_context_attachments(*, app, payload: dict[str, Any], surface: 
             "attachment_fallback": False,
         }
 
-    record = await affinity.get(session_key)
+    requires_sticky_account = bool(manual_attachments or payload.get("upstream_files"))
+    record = await affinity.get(session_key) if requires_sticky_account else None
     preferred_email = record.account_email if record else None
-    acc = await account_pool.acquire_wait_preferred(preferred_email, timeout=60)
+    if preferred_email:
+        acc = await account_pool.acquire_wait_preferred(preferred_email, timeout=60)
+    else:
+        acc = await account_pool.acquire_wait(timeout=60)
     if not acc:
         log.warning(
             "[ContextAttachment] no upstream account available; falling back inline session_key=%s surface=%s manual_attachments=%s generated_files=%s",

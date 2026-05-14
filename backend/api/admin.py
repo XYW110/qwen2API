@@ -104,13 +104,11 @@ async def add_account(request: Request):
 @router.get("/accounts", dependencies=[Depends(verify_admin)])
 async def list_accounts(request: Request):
     pool: AccountPool = request.app.state.account_pool
-    # 模拟原始 FastAPI 序列化，包含运行时状态
+    diagnostics_by_email = {item["email"]: item for item in pool.account_diagnostics()}
     accs = []
     for a in pool.accounts:
         d = a.to_dict()
-        d["valid"] = a.valid
-        d["inflight"] = a.inflight
-        d["rate_limited_until"] = a.rate_limited_until
+        d.update(diagnostics_by_email.get(a.email, {}))
         accs.append(d)
     return {"accounts": accs}
 

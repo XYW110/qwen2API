@@ -143,6 +143,7 @@ class ContextAttachmentPreparationTests(unittest.IsolatedAsyncioTestCase):
                 CONTEXT_ATTACHMENT_TTL_SECONDS=600,
             )),
             account_pool=SimpleNamespace(
+                acquire_wait=AsyncMock(return_value=SimpleNamespace(email="bot@example.com")),
                 acquire_wait_preferred=AsyncMock(return_value=SimpleNamespace(email="bot@example.com")),
                 release=lambda _acc: None,
             ),
@@ -189,6 +190,68 @@ class ContextAttachmentPreparationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Always answer as a pirate captain.", saved_texts[0])
         self.assertIn("Who are you?", saved_texts[0])
 
+    async def test_generated_context_ignores_existing_affinity_when_selecting_upload_account(self) -> None:
+        async def save_text(filename, text, content_type, purpose):
+            return {
+                "id": filename,
+                "path": f"/tmp/{filename}",
+                "filename": filename,
+                "content_type": content_type,
+                "sha256": "sha-history",
+                "created_at": 1,
+            }
+
+        async def upload_local_file(acc, local_meta):
+            return {"remote_ref": {"file_id": f"file-{acc.email}", "filename": local_meta["filename"]}}
+
+        selected_account = SimpleNamespace(email="round-robin@example.com")
+        app = SimpleNamespace(state=SimpleNamespace(
+            context_offloader=ContextOffloader(SimpleNamespace(
+                CONTEXT_INLINE_MAX_CHARS=80,
+                CONTEXT_FORCE_FILE_MAX_CHARS=160,
+                CONTEXT_ATTACHMENT_TTL_SECONDS=600,
+            )),
+            account_pool=SimpleNamespace(
+                acquire_wait=AsyncMock(return_value=selected_account),
+                acquire_wait_preferred=AsyncMock(return_value=SimpleNamespace(email="sticky@example.com")),
+                release=lambda _acc: None,
+            ),
+            file_store=SimpleNamespace(
+                save_text=save_text,
+                delete_path=AsyncMock(),
+            ),
+            session_affinity=SimpleNamespace(
+                get=AsyncMock(return_value=SimpleNamespace(account_email="sticky@example.com")),
+                bind_account=AsyncMock(),
+                add_uploaded_file=AsyncMock(),
+            ),
+            upstream_file_cache=SimpleNamespace(
+                get=AsyncMock(return_value=None),
+                set=AsyncMock(),
+            ),
+            upstream_file_uploader=SimpleNamespace(upload_local_file=upload_local_file),
+        ))
+        payload = {
+            "model": "gpt-4.1",
+            "system": "system context\n" + "runtime line\n" * 20,
+            "messages": [{"role": "user", "content": "Who are you?"}],
+            "tools": [{"name": "read", "description": "Read file contents", "parameters": {}}],
+        }
+
+        result = await prepare_context_attachments(
+            app=app,
+            payload=payload,
+            surface="openai",
+            auth_token="tok",
+            client_profile="openclaw_openai",
+        )
+
+        app.state.account_pool.acquire_wait.assert_awaited_once_with(timeout=60)
+        app.state.account_pool.acquire_wait_preferred.assert_not_awaited()
+        self.assertEqual(result["bound_account"].email, "round-robin@example.com")
+        self.assertEqual(result["bound_account_email"], "round-robin@example.com")
+        self.assertEqual(result["upstream_files"][0]["file_id"], "file-round-robin@example.com")
+
     async def test_generated_context_falls_back_inline_when_no_account_available(self) -> None:
         app = SimpleNamespace(state=SimpleNamespace(
             context_offloader=ContextOffloader(SimpleNamespace(
@@ -197,6 +260,7 @@ class ContextAttachmentPreparationTests(unittest.IsolatedAsyncioTestCase):
                 CONTEXT_ATTACHMENT_TTL_SECONDS=600,
             )),
             account_pool=SimpleNamespace(
+                acquire_wait=AsyncMock(return_value=None),
                 acquire_wait_preferred=AsyncMock(return_value=None),
                 release=lambda _acc: None,
             ),

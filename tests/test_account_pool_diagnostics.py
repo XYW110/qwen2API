@@ -1,0 +1,114 @@
+import unittest
+from unittest.mock import patch
+
+from backend.core.account_pool import Account, AccountPool
+from backend.core.config import settings
+
+
+class AccountPoolDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.original_min_interval_ms = settings.ACCOUNT_MIN_INTERVAL_MS
+
+    async def asyncTearDown(self) -> None:
+        settings.ACCOUNT_MIN_INTERVAL_MS = self.original_min_interval_ms
+
+    def _pool(self, *accounts: Account, max_inflight: int = 1) -> AccountPool:
+        pool = AccountPool(db=None, max_inflight=max_inflight)
+        pool.accounts = list(accounts)
+        return pool
+
+    def test_account_diagnostics_explains_ready_and_blocked_states(self) -> None:
+        settings.ACCOUNT_MIN_INTERVAL_MS = 1000
+        ready = Account(email="ready@example.com")
+        busy = Account(email="busy@example.com")
+        busy.inflight = 1
+        cooldown = Account(email="cooldown@example.com")
+        cooldown.last_request_started = 100.0
+        rate_limited = Account(email="rate@example.com")
+        rate_limited.rate_limited_until = 130.0
+        invalid = Account(email="invalid@example.com")
+        invalid.valid = False
+
+        pool = self._pool(ready, busy, cooldown, rate_limited, invalid)
+
+        with patch("backend.core.account_pool.time.time", return_value=100.2):
+            diagnostics = pool.account_diagnostics()
+
+        by_email = {item["email"]: item for item in diagnostics}
+        self.assertTrue(by_email["ready@example.com"]["ready"])
+        self.assertEqual(by_email["ready@example.com"]["selection_block_reason"], "ready")
+        self.assertTrue(by_email["ready@example.com"]["capacity_available"])
+        self.assertEqual(by_email["ready@example.com"]["next_available_in"], 0.0)
+
+        self.assertFalse(by_email["busy@example.com"]["ready"])
+        self.assertEqual(by_email["busy@example.com"]["selection_block_reason"], "busy")
+        self.assertFalse(by_email["busy@example.com"]["capacity_available"])
+
+        self.assertFalse(by_email["cooldown@example.com"]["ready"])
+        self.assertEqual(by_email["cooldown@example.com"]["selection_block_reason"], "cooldown")
+        self.assertAlmostEqual(by_email["cooldown@example.com"]["next_available_in"], 0.8)
+
+        self.assertFalse(by_email["rate@example.com"]["ready"])
+        self.assertTrue(by_email["rate@example.com"]["is_rate_limited"])
+        self.assertEqual(by_email["rate@example.com"]["selection_block_reason"], "rate_limited")
+        self.assertAlmostEqual(by_email["rate@example.com"]["next_available_in"], 29.8)
+
+        self.assertFalse(by_email["invalid@example.com"]["ready"])
+        self.assertEqual(by_email["invalid@example.com"]["selection_block_reason"], "invalid")
+
+    async def test_acquire_records_round_robin_selection_diagnostics(self) -> None:
+        first = Account(email="first@example.com")
+        first.last_request_started = 10.0
+        second = Account(email="second@example.com")
+        second.last_request_started = 20.0
+        pool = self._pool(second, first)
+
+        with patch("backend.core.account_pool.time.time", return_value=100.0), patch("backend.core.account_pool._jitter_seconds", return_value=0.0):
+            selected = await pool.acquire()
+
+        self.assertEqual(selected.email, "first@example.com")
+        self.assertEqual(pool.last_acquire_diagnostics["strategy"], "round_robin")
+        self.assertEqual(pool.last_acquire_diagnostics["selected_email"], "first@example.com")
+        self.assertEqual(pool.last_acquire_diagnostics["ready_count"], 2)
+
+    async def test_acquire_preferred_records_preferred_and_fallback_diagnostics(self) -> None:
+        preferred = Account(email="preferred@example.com")
+        fallback = Account(email="fallback@example.com")
+        pool = self._pool(preferred, fallback)
+
+        with patch("backend.core.account_pool.time.time", return_value=100.0), patch("backend.core.account_pool._jitter_seconds", return_value=0.0):
+            selected = await pool.acquire_preferred("preferred@example.com")
+
+        self.assertEqual(selected.email, "preferred@example.com")
+        self.assertEqual(pool.last_acquire_diagnostics["strategy"], "preferred")
+        self.assertEqual(pool.last_acquire_diagnostics["selected_email"], "preferred@example.com")
+
+        pool.release(preferred)
+        preferred.inflight = 1
+
+        with patch("backend.core.account_pool.time.time", return_value=101.0), patch("backend.core.account_pool._jitter_seconds", return_value=0.0):
+            selected = await pool.acquire_preferred("preferred@example.com")
+
+        self.assertEqual(selected.email, "fallback@example.com")
+        self.assertEqual(pool.last_acquire_diagnostics["strategy"], "fallback")
+        self.assertEqual(pool.last_acquire_diagnostics["preferred_email"], "preferred@example.com")
+        self.assertEqual(pool.last_acquire_diagnostics["selected_email"], "fallback@example.com")
+        self.assertEqual(pool.last_acquire_diagnostics["preferred_block_reason"], "busy")
+
+    async def test_acquire_wait_records_timeout_snapshot(self) -> None:
+        busy = Account(email="busy@example.com")
+        busy.inflight = 1
+        pool = self._pool(busy)
+
+        with patch("backend.core.account_pool.time.time", return_value=100.0):
+            selected = await pool.acquire_wait(timeout=0.0)
+
+        self.assertIsNone(selected)
+        self.assertEqual(pool.last_acquire_wait_diagnostics["result"], "timeout")
+        self.assertEqual(pool.last_acquire_wait_diagnostics["timeout"], 0.0)
+        self.assertEqual(pool.last_acquire_wait_diagnostics["snapshot"]["ready"], 0)
+        self.assertEqual(pool.last_acquire_wait_diagnostics["snapshot"]["blocked_reasons"], {"busy": 1})
+
+
+if __name__ == "__main__":
+    unittest.main()

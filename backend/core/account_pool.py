@@ -106,6 +106,8 @@ class AccountPool:
         self._lock = asyncio.Lock()
         self._waiters: list[asyncio.Event] = []
         self._sticky_email: Optional[str] = None
+        self.last_acquire_diagnostics: dict = {}
+        self.last_acquire_wait_diagnostics: dict = {}
 
     async def load(self):
         data = await self.db.load()
@@ -132,19 +134,143 @@ class AccountPool:
     def get_by_email(self, email: str) -> Optional[Account]:
         return next((a for a in self.accounts if a.email == email), None)
 
+    def _account_diagnostic(self, acc: Account, now: float, exclude: set | None = None) -> dict:
+        min_interval = max(0, settings.ACCOUNT_MIN_INTERVAL_MS) / 1000.0
+        next_available_at = max(acc.rate_limited_until, acc.last_request_started + min_interval)
+        next_available_in = round(max(0.0, next_available_at - now), 3)
+        is_excluded = bool(exclude and acc.email in exclude)
+        is_rate_limited = acc.rate_limited_until > now
+        capacity_available = acc.inflight < self.max_inflight
+
+        if is_excluded:
+            reason = "excluded"
+        elif acc.activation_pending:
+            reason = "pending_activation"
+        elif not acc.valid:
+            reason = acc.status_code if acc.status_code and acc.status_code != "valid" else "invalid"
+        elif is_rate_limited:
+            reason = "rate_limited"
+        elif not capacity_available:
+            reason = "busy"
+        elif next_available_at > now:
+            reason = "cooldown"
+        else:
+            reason = "ready"
+
+        return {
+            "email": acc.email,
+            "valid": acc.valid,
+            "status_code": acc.get_status_code(),
+            "status_text": acc.get_status_text(),
+            "ready": reason == "ready",
+            "selection_block_reason": reason,
+            "inflight": acc.inflight,
+            "max_inflight": self.max_inflight,
+            "capacity_available": capacity_available,
+            "is_rate_limited": is_rate_limited,
+            "rate_limited_until": acc.rate_limited_until,
+            "next_available_at": next_available_at,
+            "next_available_in": next_available_in,
+            "last_used": acc.last_used,
+            "last_request_started": acc.last_request_started,
+            "last_request_finished": acc.last_request_finished,
+        }
+
+    def account_diagnostics(self, exclude: set | None = None) -> list[dict]:
+        now = time.time()
+        return [self._account_diagnostic(acc, now, exclude) for acc in self.accounts]
+
+    def _scheduler_snapshot(self, now: float, exclude: set | None = None) -> dict:
+        diagnostics = [self._account_diagnostic(acc, now, exclude) for acc in self.accounts]
+        blocked_reasons: dict[str, int] = {}
+        for item in diagnostics:
+            if item["ready"]:
+                continue
+            reason = item["selection_block_reason"]
+            blocked_reasons[reason] = blocked_reasons.get(reason, 0) + 1
+        ready_count = sum(1 for item in diagnostics if item["ready"])
+        next_candidates = [item["next_available_at"] for item in diagnostics if item["valid"] and item["selection_block_reason"] != "excluded"]
+        next_ready_at = min(next_candidates, default=0.0)
+        return {
+            "total": len(diagnostics),
+            "ready": ready_count,
+            "blocked": len(diagnostics) - ready_count,
+            "blocked_reasons": blocked_reasons,
+            "in_use": sum(item["inflight"] for item in diagnostics),
+            "waiting": len(self._waiters),
+            "max_inflight": self.max_inflight,
+            "account_min_interval_ms": getattr(settings, "ACCOUNT_MIN_INTERVAL_MS", 0),
+            "next_ready_at": next_ready_at,
+            "next_ready_in": round(max(0.0, next_ready_at - now), 3) if next_ready_at else 0.0,
+        }
+
+    def _record_acquire_diagnostics(
+        self,
+        *,
+        strategy: str,
+        selected_email: str | None,
+        diagnostics: list[dict],
+        now: float,
+        preferred_email: str | None = None,
+        preferred_block_reason: str | None = None,
+        exclude: set | None = None,
+    ) -> None:
+        ready_count = sum(1 for item in diagnostics if item["ready"])
+        blocked_reasons: dict[str, int] = {}
+        for item in diagnostics:
+            if item["ready"]:
+                continue
+            reason = item["selection_block_reason"]
+            blocked_reasons[reason] = blocked_reasons.get(reason, 0) + 1
+        self.last_acquire_diagnostics = {
+            "strategy": strategy,
+            "selected_email": selected_email,
+            "preferred_email": preferred_email,
+            "preferred_block_reason": preferred_block_reason,
+            "ready_count": ready_count,
+            "blocked_count": len(diagnostics) - ready_count,
+            "blocked_reasons": blocked_reasons,
+            "snapshot": self._scheduler_snapshot(now, exclude),
+        }
+
     async def acquire_preferred(self, preferred_email: str | None = None, exclude: set = None) -> Optional[Account]:
         if not preferred_email:
             return await self.acquire(exclude)
+        preferred_block_reason = "missing"
         async with self._lock:
             now = time.time()
+            diagnostics = [self._account_diagnostic(acc, now, exclude) for acc in self.accounts]
+            preferred_diag = next((item for item in diagnostics if item["email"] == preferred_email), None)
             preferred = next((a for a in self.accounts if a.email == preferred_email), None)
-            if preferred and preferred.is_available() and preferred.inflight < self.max_inflight and preferred.next_available_at() <= now and (not exclude or preferred.email not in exclude):
+            if preferred_diag:
+                preferred_block_reason = preferred_diag["selection_block_reason"]
+            if preferred and preferred_diag and preferred_diag["ready"]:
                 preferred.inflight += 1
                 preferred.last_used = now
                 preferred.last_request_started = now + _jitter_seconds()
                 self._sticky_email = preferred.email
+                self._record_acquire_diagnostics(
+                    strategy="preferred",
+                    selected_email=preferred.email,
+                    diagnostics=diagnostics,
+                    now=now,
+                    preferred_email=preferred_email,
+                    exclude=exclude,
+                )
+                log.info("[账号池] acquire_selected strategy=preferred email=%s ready=%s", preferred.email, self.last_acquire_diagnostics["ready_count"])
                 return preferred
-        return await self.acquire(exclude)
+
+        acc = await self.acquire(exclude)
+        fallback_diag = dict(self.last_acquire_diagnostics)
+        fallback_diag.update({
+            "strategy": "fallback",
+            "preferred_email": preferred_email,
+            "preferred_block_reason": preferred_block_reason,
+        })
+        self.last_acquire_diagnostics = fallback_diag
+        if acc:
+            log.info("[账号池] acquire_selected strategy=fallback preferred=%s email=%s reason=%s", preferred_email, acc.email, preferred_block_reason)
+        return acc
 
     async def acquire_wait_preferred(self, preferred_email: str | None = None, timeout: float = 60, exclude: set = None) -> Optional[Account]:
         deadline = time.time() + timeout
@@ -168,12 +294,17 @@ class AccountPool:
     async def acquire(self, exclude: set = None) -> Optional[Account]:
         async with self._lock:
             now = time.time()
-            available = [a for a in self.accounts if a.is_available() and (not exclude or a.email not in exclude)]
-            if not available:
-                return None
-
-            ready = [a for a in available if a.inflight < self.max_inflight and a.next_available_at() <= now]
+            diagnostics = [self._account_diagnostic(acc, now, exclude) for acc in self.accounts]
+            ready_emails = {item["email"] for item in diagnostics if item["ready"]}
+            ready = [a for a in self.accounts if a.email in ready_emails]
             if not ready:
+                self._record_acquire_diagnostics(
+                    strategy="round_robin",
+                    selected_email=None,
+                    diagnostics=diagnostics,
+                    now=now,
+                    exclude=exclude,
+                )
                 return None
 
             ready.sort(key=lambda a: (a.inflight, a.last_request_started or 0.0, a.last_used or 0.0))
@@ -182,6 +313,14 @@ class AccountPool:
             best.last_used = now
             best.last_request_started = now + _jitter_seconds()
             self._sticky_email = best.email if len(ready) == 1 else None
+            self._record_acquire_diagnostics(
+                strategy="round_robin",
+                selected_email=best.email,
+                diagnostics=diagnostics,
+                now=now,
+                exclude=exclude,
+            )
+            log.info("[账号池] acquire_selected strategy=round_robin email=%s ready=%s", best.email, self.last_acquire_diagnostics["ready_count"])
             return best
 
     async def acquire_wait(self, timeout: float = 60, exclude: set = None) -> Optional[Account]:
@@ -189,19 +328,45 @@ class AccountPool:
         while True:
             acc = await self.acquire(exclude)
             if acc:
+                self.last_acquire_wait_diagnostics = {
+                    "result": "selected",
+                    "timeout": timeout,
+                    "selected_email": acc.email,
+                    "snapshot": self.last_acquire_diagnostics.get("snapshot", {}),
+                }
                 return acc
 
             async with self._lock:
+                now = time.time()
                 candidates = [
                     a for a in self.accounts
                     if a.valid and (not exclude or a.email not in exclude)
                 ]
+                snapshot = self._scheduler_snapshot(now, exclude)
                 if not candidates:
+                    self.last_acquire_wait_diagnostics = {
+                        "result": "no_candidates",
+                        "timeout": timeout,
+                        "snapshot": snapshot,
+                    }
+                    log.warning("[账号池] acquire_wait_no_candidates snapshot=%s", snapshot)
                     return None
-                next_ready_at = min((a.next_available_at() for a in candidates), default=time.time())
+                next_ready_at = min((a.next_available_at() for a in candidates), default=now)
 
             remaining = deadline - time.time()
             if remaining <= 0:
+                self.last_acquire_wait_diagnostics = {
+                    "result": "timeout",
+                    "timeout": timeout,
+                    "snapshot": snapshot,
+                }
+                log.warning(
+                    "[账号池] acquire_wait_timeout timeout=%s ready=%s blocked_reasons=%s waiting=%s",
+                    timeout,
+                    snapshot["ready"],
+                    snapshot["blocked_reasons"],
+                    snapshot["waiting"],
+                )
                 return None
 
             evt = asyncio.Event()
@@ -259,17 +424,24 @@ class AccountPool:
         invalid = [a for a in self.accounts if a.get_status_code() not in ("valid", "rate_limited")]
         activation_pending = [a for a in self.accounts if a.get_status_code() == "pending_activation"]
         banned = [a for a in self.accounts if a.get_status_code() == "banned"]
-        in_use = sum(a.inflight for a in self.accounts)
-        account_min_interval_ms = getattr(settings, "ACCOUNT_MIN_INTERVAL_MS", 0)
+        now = time.time()
+        snapshot = self._scheduler_snapshot(now)
         return {
             "total": len(self.accounts),
             "valid": len(available),
+            "ready": snapshot["ready"],
+            "blocked": snapshot["blocked"],
+            "blocked_reasons": snapshot["blocked_reasons"],
             "rate_limited": len(rate_limited),
             "invalid": len(invalid),
             "activation_pending": len(activation_pending),
             "banned": len(banned),
-            "in_use": in_use,
+            "in_use": snapshot["in_use"],
             "max_inflight": self.max_inflight,
             "waiting": len(self._waiters),
-            "account_min_interval_ms": account_min_interval_ms,
+            "account_min_interval_ms": snapshot["account_min_interval_ms"],
+            "next_ready_at": snapshot["next_ready_at"],
+            "next_ready_in": snapshot["next_ready_in"],
+            "last_acquire_diagnostics": self.last_acquire_diagnostics,
+            "last_acquire_wait_diagnostics": self.last_acquire_wait_diagnostics,
         }
