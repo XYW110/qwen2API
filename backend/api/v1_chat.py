@@ -139,11 +139,8 @@ _repeated_tool_request_guard = _RepeatedToolRequestGuard()
 
 
 def _build_repeated_tool_request_notice(tool_names: list[str]) -> str:
-    names = ", ".join(tool_names) or "unknown"
-    return (
-        f"上一轮已经返回工具调用（{names}），但本轮仍是相同的原始用户请求，"
-        "没有携带 assistant tool_calls 或 tool 结果。为避免重复调用上游，请让客户端执行工具并续传工具结果后再继续。"
-    )
+    del tool_names
+    return ""
 
 
 def _build_openai_text_payload(*, completion_id: str, created: int, model_name: str, content: str, prompt: str) -> dict[str, Any]:

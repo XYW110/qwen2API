@@ -1,6 +1,10 @@
 import unittest
 
-from backend.api.v1_chat import _RepeatedToolRequestGuard, _build_openai_request_diagnostics
+from backend.api.v1_chat import (
+    _RepeatedToolRequestGuard,
+    _build_openai_request_diagnostics,
+    _build_repeated_tool_request_notice,
+)
 
 
 class OpenAIRequestDiagnosticsTests(unittest.TestCase):
@@ -91,6 +95,13 @@ class OpenAIRequestDiagnosticsTests(unittest.TestCase):
         repeated = guard.repeated_user_only_tool_request("session-1", continuation)
 
         self.assertIsNone(repeated)
+
+    def test_repeated_tool_request_notice_is_not_user_visible(self) -> None:
+        notice = _build_repeated_tool_request_notice(["exec"])
+
+        self.assertEqual(notice, "")
+        self.assertNotIn("上一轮已经返回工具调用", notice)
+        self.assertNotIn("请让客户端执行工具", notice)
 
 
 if __name__ == "__main__":
