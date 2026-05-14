@@ -214,13 +214,28 @@ def _log_openai_stream_sse_chunk(*, req_id: str, completion_id: str, prompt_hash
     delta = delta if isinstance(delta, dict) else {}
     tool_calls = delta.get("tool_calls")
     tool_names = []
+    tool_details = []
     if isinstance(tool_calls, list):
         for tool_call in tool_calls:
-            function = tool_call.get("function") if isinstance(tool_call, dict) else None
-            if isinstance(function, dict) and function.get("name"):
-                tool_names.append(function.get("name"))
+            if not isinstance(tool_call, dict):
+                continue
+            function = tool_call.get("function")
+            function = function if isinstance(function, dict) else {}
+            name = function.get("name")
+            arguments = function.get("arguments")
+            if name:
+                tool_names.append(name)
+            tool_details.append(
+                {
+                    "index": tool_call.get("index"),
+                    "id": tool_call.get("id"),
+                    "type": tool_call.get("type"),
+                    "name": name,
+                    "arguments_chars": len(arguments) if isinstance(arguments, str) else 0,
+                }
+            )
     log.info(
-        "[OAI] stream_sse_chunk req_id=%s completion_id=%s prompt_hash=%s choices=%s role=%s has_content=%s content_chars=%s has_tool_calls=%s tool_names=%s finish_reason=%s",
+        "[OAI] stream_sse_chunk req_id=%s completion_id=%s prompt_hash=%s choices=%s role=%s has_content=%s content_chars=%s has_tool_calls=%s tool_names=%s tool_details=%s finish_reason=%s",
         req_id,
         completion_id,
         prompt_hash,
@@ -230,6 +245,7 @@ def _log_openai_stream_sse_chunk(*, req_id: str, completion_id: str, prompt_hash
         len(str(delta.get("content") or "")),
         bool(tool_calls),
         tool_names,
+        tool_details,
         choice.get("finish_reason"),
     )
 

@@ -277,6 +277,12 @@ class V1ChatStreamingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("[OAI] stream_sse_chunk", log_output)
         self.assertIn("has_tool_calls=True", log_output)
         self.assertIn("finish_reason=tool_calls", log_output)
+        self.assertIn("tool_details=", log_output)
+        self.assertIn("'index': 0", log_output)
+        self.assertIn("'id': 'call_1'", log_output)
+        self.assertIn("'type': 'function'", log_output)
+        self.assertIn("'name': 'exec'", log_output)
+        self.assertIn("'arguments_chars': 22", log_output)
 
     async def test_streaming_retry_does_not_leak_failed_attempt_text(self) -> None:
         app = types.SimpleNamespace(
