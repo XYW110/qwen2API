@@ -95,6 +95,41 @@ class UpstreamTimeoutTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, {"status": 200, "body": "{}"})
         self.assertEqual(captured["timeout"], 88.0)
 
+    async def test_executor_releases_account_when_stream_is_closed_after_acquire(self) -> None:
+        acc = SimpleNamespace(email="acc@example.com", token="tok")
+
+        class FakePool:
+            def __init__(self):
+                self.released = 0
+
+            async def acquire_wait(self, *, timeout, exclude):
+                del timeout, exclude
+                return acc
+
+            def release(self, released_acc):
+                if released_acc is not acc:
+                    raise AssertionError("released unexpected account")
+                self.released += 1
+
+        class FakeExecutor(QwenExecutor):
+            async def create_chat(self, token, model):
+                del token, model
+                return "chat-1"
+
+            async def stream(self, token, chat_id, model, content, has_custom_tools, files=None):
+                del token, chat_id, model, content, has_custom_tools, files
+                yield {"type": "delta", "phase": "answer", "content": "hello"}
+
+        pool = FakePool()
+        executor = FakeExecutor(engine=None, account_pool=pool)
+        stream = executor.chat_stream_events_with_retry("qwen3.6-plus", "hello")
+
+        first = await anext(stream)
+        await stream.aclose()
+
+        self.assertEqual(first["type"], "meta")
+        self.assertEqual(pool.released, 1)
+
     async def test_qwen_client_stream_uses_configured_read_timeout(self) -> None:
         captured = {}
 

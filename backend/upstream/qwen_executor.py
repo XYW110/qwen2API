@@ -190,6 +190,9 @@ class QwenExecutor:
             except Exception:
                 self.account_pool.release(acc)
                 raise
+            except (asyncio.CancelledError, GeneratorExit):
+                self.account_pool.release(acc)
+                raise
 
         for attempt in range(settings.MAX_RETRIES):
             update_request_context(upstream_attempt=attempt + 1)
@@ -238,5 +241,8 @@ class QwenExecutor:
                 log.warning(
                     f"[Executor] retry attempt={attempt + 1}/{settings.MAX_RETRIES} account={acc.email} error={e}"
                 )
+            except (asyncio.CancelledError, GeneratorExit):
+                self.account_pool.release(acc)
+                raise
 
         raise Exception(f"All {settings.MAX_RETRIES} attempts failed. Please check upstream accounts.")

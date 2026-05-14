@@ -162,7 +162,7 @@ async def run_completion_bridge(
         capture_events=capture_events,
         on_delta=on_delta,
     )
-    usage = calculate_usage(prompt, execution.state.answer_text)
+    usage = calculate_usage(prompt, execution.state.answer_text, getattr(execution.state, "tool_calls", []))
     await add_used_tokens(users_db, token, usage_delta if usage_delta is not None else usage["total_tokens"])
     await cleanup_runtime_resources(
         client,
@@ -235,7 +235,7 @@ async def run_retryable_completion_bridge(
             directive=directive,
             history_messages=history_messages,
         )
-        usage = calculate_usage(current_prompt, execution.state.answer_text)
+        usage = calculate_usage(current_prompt, execution.state.answer_text, getattr(execution.state, "tool_calls", []))
         usage_delta = usage_delta_factory(execution, current_prompt) if usage_delta_factory is not None else usage["total_tokens"]
         await add_used_tokens(users_db, token, usage_delta)
         await cleanup_runtime_resources(

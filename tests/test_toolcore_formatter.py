@@ -56,6 +56,34 @@ class ToolCoreFormatterTests(unittest.TestCase):
 
         self.assertEqual(payload["candidates"][0]["content"]["parts"][0]["text"], "hello")
 
+    def test_openai_chat_formatter_counts_tool_calls_as_completion_usage(self) -> None:
+        payload = build_canonical_openai_chat_payload(
+            completion_id="chatcmpl_tool_usage",
+            created=1,
+            model_name="gpt-4.1",
+            prompt="prompt",
+            answer_text="",
+            reasoning_text="",
+            directives=[{"type": "tool_use", "id": "call_1", "name": "Read", "input": {"path": "README.md"}}],
+        )
+
+        self.assertGreater(payload["usage"]["completion_tokens"], 0)
+        self.assertEqual(payload["usage"]["total_tokens"], payload["usage"]["prompt_tokens"] + payload["usage"]["completion_tokens"])
+
+    def test_openai_responses_formatter_counts_tool_calls_as_output_usage(self) -> None:
+        payload = build_canonical_openai_responses_payload(
+            response_id="resp_tool_usage",
+            created=1,
+            model_name="gpt-4.1",
+            prompt="prompt",
+            answer_text="",
+            reasoning_text="",
+            directives=[{"type": "tool_use", "id": "call_1", "name": "Read", "input": {"path": "README.md"}}],
+        )
+
+        self.assertGreater(payload["usage"]["output_tokens"], 0)
+        self.assertEqual(payload["usage"]["total_tokens"], payload["usage"]["input_tokens"] + payload["usage"]["output_tokens"])
+
     def test_openai_chat_formatter_reports_token_usage(self) -> None:
         prompt = "hello world hello world hello world"
         answer_text = "I will review the project structure first."

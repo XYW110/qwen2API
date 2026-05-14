@@ -12,7 +12,7 @@ from backend.core.config import settings
 from backend.core.request_logging import update_request_context
 from backend.runtime.stream_metrics import StreamMetrics
 from backend.services import tool_parser
-from backend.services.token_calc import count_tokens
+from backend.services.token_calc import completion_text_for_usage, count_tokens
 from backend.toolcore.directive_parser import parse_state_tool_calls, parse_textual_tool_calls
 from backend.toolcore.policy import evaluate_tool_policy, recent_same_tool_identity_count_in_turn
 from backend.toolcore.stream_sieve import ToolStreamSieve
@@ -773,12 +773,17 @@ def inject_assistant_message(prompt: str, message: str) -> str:
     return next_prompt + "\n\n" + message + "\nAssistant:"
 
 
+def _execution_completion_text_for_usage(execution: RuntimeExecutionResult) -> str:
+    state = execution.state
+    return completion_text_for_usage(state.answer_text, getattr(state, "tool_calls", []))
+
+
 def retryable_usage_delta(prompt: str):
-    return lambda execution, current_prompt=None: count_tokens(execution.state.answer_text) + count_tokens(current_prompt or prompt)
+    return lambda execution, current_prompt=None: count_tokens(_execution_completion_text_for_usage(execution)) + count_tokens(current_prompt or prompt)
 
 
 def build_usage_delta_factory(prompt: str) -> Callable[[RuntimeExecutionResult, Any | None], int]:
-    return lambda execution, current_prompt=None: count_tokens(execution.state.answer_text) + count_tokens(current_prompt or prompt)
+    return lambda execution, current_prompt=None: count_tokens(_execution_completion_text_for_usage(execution)) + count_tokens(current_prompt or prompt)
 
 
 def request_max_attempts(request: StandardRequest) -> int:

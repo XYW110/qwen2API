@@ -40,8 +40,9 @@ def _stream_usage(result, prompt: str) -> dict[str, int]:
     execution = getattr(result, "execution", None)
     state = getattr(execution, "state", None)
     answer_text = getattr(state, "answer_text", "") or ""
+    tool_calls = getattr(state, "tool_calls", []) or []
     result_prompt = getattr(result, "prompt", prompt) or prompt
-    return calculate_usage(result_prompt, answer_text)
+    return calculate_usage(result_prompt, answer_text, tool_calls)
 
 
 def _detect_openai_client_profile(request: Request, req_data: dict) -> str:
@@ -247,6 +248,48 @@ async def chat_completions(request: Request):
     if file_store is not None:
         preprocessed = await preprocess_attachments(req_data, file_store, owner_token=token)
         req_data = preprocessed.payload
+
+    completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+    created = int(time.time())
+    req_id = new_request_id()
+    client_host = request.client.host if request.client else "-"
+    early_standard_request = _build_standard_request(req_data, client_profile=client_profile)
+    early_diagnostics = _build_openai_request_diagnostics(req_data, prompt=early_standard_request.prompt)
+    repeated_tool_names = _repeated_tool_request_guard.repeated_user_only_tool_request(
+        session_key,
+        early_diagnostics,
+    )
+    if repeated_tool_names:
+        notice = _build_repeated_tool_request_notice(repeated_tool_names)
+        with request_context(req_id=req_id, surface="openai", requested_model=early_standard_request.response_model, resolved_model=early_standard_request.resolved_model):
+            log.warning(
+                "[OAI] repeated_user_only_tool_request req_id=%s completion_id=%s session=%s prompt_hash=%s tool_names=%s before_context_upload=True",
+                req_id,
+                completion_id,
+                session_key,
+                early_diagnostics["prompt_hash"],
+                repeated_tool_names,
+            )
+        if early_standard_request.stream:
+            return StreamingResponse(
+                _openai_text_stream_chunks(
+                    completion_id=completion_id,
+                    created=created,
+                    model_name=early_standard_request.response_model,
+                    content=notice,
+                    prompt=early_standard_request.prompt,
+                ),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+        return JSONResponse(_build_openai_text_payload(
+            completion_id=completion_id,
+            created=created,
+            model_name=early_standard_request.response_model,
+            content=notice,
+            prompt=early_standard_request.prompt,
+        ))
+
     context_prepared = await prepare_context_attachments(app=app, payload=req_data, surface="openai", auth_token=token, client_profile=client_profile, existing_attachments=(preprocessed.attachments if preprocessed is not None else None))
     req_data = context_prepared["payload"]
     standard_request = _build_standard_request(req_data, client_profile=client_profile)
@@ -287,11 +330,8 @@ async def chat_completions(request: Request):
     tools = standard_request.tools
     history_messages = original_history_messages
 
-    completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-    created = int(time.time())
-    req_id = new_request_id()
     diagnostics = _build_openai_request_diagnostics(req_data, prompt=prompt)
-    client_host = request.client.host if request.client else "-"
+    guard_diagnostics = early_diagnostics
 
     with request_context(req_id=req_id, surface="openai", requested_model=model_name, resolved_model=qwen_model):
         log.info(
@@ -425,7 +465,7 @@ async def chat_completions(request: Request):
                                 tool_names = [block.get("name") for block in directive.tool_blocks if block.get("type") == "tool_use"]
                                 _record_repeated_tool_guard(
                                     session_key=standard_request.session_key or session_key,
-                                    diagnostics=diagnostics,
+                                    diagnostics=guard_diagnostics,
                                     tool_names=tool_names,
                                     finish_reason=final_finish_reason,
                                 )
@@ -496,7 +536,7 @@ async def chat_completions(request: Request):
                                 tool_names = [block.get("name") for block in directive.tool_blocks if block.get("type") == "tool_use"]
                                 _record_repeated_tool_guard(
                                     session_key=standard_request.session_key or session_key,
-                                    diagnostics=diagnostics,
+                                    diagnostics=guard_diagnostics,
                                     tool_names=tool_names,
                                     finish_reason=final_finish_reason,
                                 )
@@ -595,7 +635,7 @@ async def chat_completions(request: Request):
                 final_finish_reason = "tool_calls" if directive.stop_reason == "tool_use" else (execution.state.finish_reason or "stop")
                 _record_repeated_tool_guard(
                     session_key=standard_request.session_key or session_key,
-                    diagnostics=diagnostics,
+                    diagnostics=guard_diagnostics,
                     tool_names=tool_names,
                     finish_reason=final_finish_reason,
                 )

@@ -1,5 +1,8 @@
-import tiktoken
+import json
 import logging
+from typing import Any
+
+import tiktoken
 
 log = logging.getLogger("qwen2api.token")
 
@@ -22,10 +25,39 @@ def count_tokens(text: str) -> int:
     # Fallback：每汉字 1 token，每 3 个英文字母 1 token 的粗略估算
     return max(1, len(text.encode('utf-8')) // 2)
 
-def calculate_usage(prompt: str, completion: str) -> dict:
+def serialize_tool_calls_for_usage(tool_calls: list[dict[str, Any]] | None) -> str:
+    if not tool_calls:
+        return ""
+    normalized: list[dict[str, Any]] = []
+    for call in tool_calls:
+        if not isinstance(call, dict):
+            continue
+        if call.get("type") == "tool_use":
+            normalized.append({
+                "id": call.get("id"),
+                "type": "tool_use",
+                "name": call.get("name"),
+                "input": call.get("input", {}),
+            })
+            continue
+        normalized.append(call)
+    if not normalized:
+        return ""
+    return json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def completion_text_for_usage(completion: str, tool_calls: list[dict[str, Any]] | None = None) -> str:
+    parts = [completion] if completion else []
+    tool_text = serialize_tool_calls_for_usage(tool_calls)
+    if tool_text:
+        parts.append(tool_text)
+    return "\n".join(parts)
+
+
+def calculate_usage(prompt: str, completion: str, tool_calls: list[dict[str, Any]] | None = None) -> dict:
     """结算：精确扣费"""
     prompt_tokens = count_tokens(prompt)
-    completion_tokens = count_tokens(completion)
+    completion_tokens = count_tokens(completion_text_for_usage(completion, tool_calls))
     total_tokens = prompt_tokens + completion_tokens
     return {
         "prompt_tokens": prompt_tokens,

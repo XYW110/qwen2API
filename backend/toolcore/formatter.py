@@ -4,7 +4,7 @@ import json
 import uuid
 from typing import Any
 
-from backend.services.token_calc import calculate_usage, count_tokens
+from backend.services.token_calc import calculate_usage, completion_text_for_usage, count_tokens
 
 
 def build_canonical_openai_chat_payload(*, completion_id: str, created: int, model_name: str, prompt: str, answer_text: str, reasoning_text: str, directives: list[dict[str, Any]]) -> dict[str, Any]:
@@ -36,7 +36,7 @@ def build_canonical_openai_chat_payload(*, completion_id: str, created: int, mod
         "created": created,
         "model": model_name,
         "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
-        "usage": calculate_usage(prompt, answer_text),
+        "usage": calculate_usage(prompt, answer_text, message.get("tool_calls", [])),
     }
 
 
@@ -76,7 +76,7 @@ def build_canonical_openai_responses_payload(*, response_id: str, created: int, 
             }
         )
     input_tokens = count_tokens(prompt)
-    output_tokens = count_tokens(answer_text)
+    output_tokens = count_tokens(completion_text_for_usage(answer_text, tool_blocks))
     return {
         "id": response_id,
         "object": "response",
