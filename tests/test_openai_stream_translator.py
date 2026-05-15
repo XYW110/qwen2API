@@ -8,12 +8,12 @@ from backend.toolcore.types import ToolDefinition
 
 
 class OpenAIStreamTranslatorTests(unittest.TestCase):
-    def test_emit_tool_calls_splits_arguments_into_multiple_chunks(self) -> None:
+    def test_emit_tool_calls_uses_full_arguments_without_splitting(self) -> None:
         translator = OpenAIStreamTranslator(
             completion_id="chatcmpl_test",
             created=1,
             model_name="gpt-4.1",
-            client_profile="openclaw_openai",
+            client_profile="claude_code_openai",
         )
 
         translator.emit_tool_calls([
@@ -27,11 +27,9 @@ class OpenAIStreamTranslatorTests(unittest.TestCase):
         payloads = [json.loads(chunk[6:].strip()) for chunk in translator.pending_chunks if chunk.startswith("data: ")]
         tool_call_chunks = [payload["choices"][0]["delta"]["tool_calls"][0] for payload in payloads if payload["choices"][0]["delta"].get("tool_calls")]
 
+        self.assertEqual(len(tool_call_chunks), 1)
         self.assertEqual(tool_call_chunks[0]["function"]["name"], "Read")
-        self.assertNotIn("arguments", tool_call_chunks[0]["function"])
-        rebuilt = "".join(chunk["function"].get("arguments", "") for chunk in tool_call_chunks[1:])
-        self.assertEqual(rebuilt, json.dumps({"file_path": "a" * 300}, ensure_ascii=False))
-        self.assertGreater(len(tool_call_chunks), 2)
+        self.assertEqual(tool_call_chunks[0]["function"]["arguments"], json.dumps({"file_path": "a" * 300}, ensure_ascii=False))
 
     def test_emit_tool_calls_maps_gateway_name_back_to_client_name(self) -> None:
         catalog = ToolCatalog([
