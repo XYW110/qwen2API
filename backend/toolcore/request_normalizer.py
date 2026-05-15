@@ -37,6 +37,10 @@ def _normalize_messages(raw_messages: Any) -> list[dict[str, Any]]:
     raise ValueError("messages/input must be a string, object, or list")
 
 
+def _model_tool_name(index: int) -> str:
+    return f"gateway_tool_{index}"
+
+
 def _normalize_tools(raw_tools: Any) -> list[ToolDefinition]:
     if raw_tools is None:
         return []
@@ -44,7 +48,7 @@ def _normalize_tools(raw_tools: Any) -> list[ToolDefinition]:
         raise ValueError("tools must be a list")
 
     tools: list[ToolDefinition] = []
-    for raw_tool in raw_tools:
+    for index, raw_tool in enumerate(raw_tools):
         if not isinstance(raw_tool, dict):
             continue
         function_payload = _dict_or_empty(raw_tool.get("function"))
@@ -71,7 +75,7 @@ def _normalize_tools(raw_tools: Any) -> list[ToolDefinition]:
                 description=description,
                 parameters=parameters,
                 client_name=name,
-                model_name=name,
+                model_name=_model_tool_name(index),
                 raw=raw_tool,
             )
         )
@@ -183,7 +187,7 @@ def _normalize_gemini_tool_choice(body: dict[str, Any]) -> Any:
 def to_prompt_payload(request: ToolCoreRequest, *, model: str, stream: bool = False) -> dict[str, Any]:
     tools = [
         {
-            "name": tool.client_name or tool.name,
+            "name": tool.model_name or tool.name,
             "description": tool.description,
             "parameters": tool.parameters,
         }
@@ -191,12 +195,13 @@ def to_prompt_payload(request: ToolCoreRequest, *, model: str, stream: bool = Fa
     ]
 
     tool_choice: Any = request.raw_tool_choice
-    if tool_choice is None and request.tool_choice_policy == ToolChoicePolicy.NONE:
+    if request.tool_choice_policy == ToolChoicePolicy.NONE:
         tool_choice = "none"
-    elif tool_choice is None and request.tool_choice_policy == ToolChoicePolicy.REQUIRED:
+    elif request.tool_choice_policy == ToolChoicePolicy.REQUIRED:
         tool_choice = "required"
-    elif tool_choice is None and request.tool_choice_policy == ToolChoicePolicy.FORCED and request.forced_tool_name:
-        tool_choice = {"type": "function", "function": {"name": request.forced_tool_name}}
+    elif request.tool_choice_policy == ToolChoicePolicy.FORCED and request.forced_tool_name:
+        model_tool_name = request.tool_catalog.get_model_name(request.forced_tool_name) if request.tool_catalog else None
+        tool_choice = {"type": "function", "function": {"name": model_tool_name or request.forced_tool_name}}
 
     return {
         "model": model,
@@ -204,6 +209,7 @@ def to_prompt_payload(request: ToolCoreRequest, *, model: str, stream: bool = Fa
         "tools": tools,
         "tool_choice": tool_choice,
         "stream": stream,
+        "_tool_catalog": request.tool_catalog,
     }
 
 

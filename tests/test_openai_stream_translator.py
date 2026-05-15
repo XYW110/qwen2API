@@ -3,6 +3,8 @@ import unittest
 
 from backend.services.openai_stream_translator import OpenAIStreamTranslator
 from backend.services.token_calc import calculate_usage
+from backend.toolcore.tool_catalog import ToolCatalog
+from backend.toolcore.types import ToolDefinition
 
 
 class OpenAIStreamTranslatorTests(unittest.TestCase):
@@ -30,6 +32,32 @@ class OpenAIStreamTranslatorTests(unittest.TestCase):
         rebuilt = "".join(chunk["function"].get("arguments", "") for chunk in tool_call_chunks[1:])
         self.assertEqual(rebuilt, json.dumps({"file_path": "a" * 300}, ensure_ascii=False))
         self.assertGreater(len(tool_call_chunks), 2)
+
+    def test_emit_tool_calls_maps_gateway_name_back_to_client_name(self) -> None:
+        catalog = ToolCatalog([
+            ToolDefinition(name="exec", client_name="exec", model_name="gateway_tool_0"),
+        ])
+        translator = OpenAIStreamTranslator(
+            completion_id="chatcmpl_test",
+            created=1,
+            model_name="gpt-4.1",
+            client_profile="openclaw_openai",
+            tool_catalog=catalog,
+        )
+
+        translator.emit_tool_calls([
+            {
+                "id": "call_1",
+                "name": "gateway_tool_0",
+                "input": {"command": "echo hi"},
+            }
+        ])
+
+        payloads = [json.loads(chunk[6:].strip()) for chunk in translator.pending_chunks if chunk.startswith("data: ")]
+        tool_call_chunks = [payload["choices"][0]["delta"]["tool_calls"][0] for payload in payloads if payload["choices"][0]["delta"].get("tool_calls")]
+
+        self.assertEqual(tool_call_chunks[0]["function"]["name"], "exec")
+        self.assertNotEqual(tool_call_chunks[0]["function"]["name"], "gateway_tool_0")
 
     def test_finalize_can_emit_token_usage_chunk(self) -> None:
         translator = OpenAIStreamTranslator(

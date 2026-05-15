@@ -378,15 +378,23 @@ def build_anthropic_assistant_history_message(*, execution, request: StandardReq
     return {"role": "assistant", "content": content_blocks}
 
 
+def _client_tool_name(name: str, request: StandardRequest) -> str:
+    if request.tool_catalog is None:
+        return name
+    canonical = request.tool_catalog.get_canonical_name(name)
+    if canonical is None:
+        return name
+    return request.tool_catalog.get_client_name(canonical)
+
+
 def build_openai_assistant_history_message(*, execution, request: StandardRequest, directive) -> dict[str, Any]:
-    del request
     if directive.stop_reason == 'tool_use':
         tool_calls = [
             {
                 'id': block['id'],
                 'type': 'function',
                 'function': {
-                    'name': block['name'],
+                    'name': _client_tool_name(str(block['name']), request),
                     'arguments': json.dumps(block.get('input', {}), ensure_ascii=False),
                 },
             }

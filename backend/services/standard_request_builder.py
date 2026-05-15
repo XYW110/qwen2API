@@ -20,7 +20,7 @@ def build_chat_standard_request(req_data: dict, *, default_model: str, surface: 
     tools = prompt_result.tools
     tool_names = [tool_name for tool_name in (tool.get("name") for tool in tools) if isinstance(tool_name, str) and tool_name]
     coding_intent = request_looks_like_coding_task(req_data, client_profile=effective_client_profile)
-    tool_choice = normalize_tool_choice(normalized_request.raw_tool_choice)
+    tool_choice = normalize_tool_choice(normalized_payload.get("tool_choice"))
     tool_choice = enforce_declared_tool_choice(tool_choice, tool_names)
     return StandardRequest(
         prompt=prompt_result.prompt,
@@ -42,5 +42,5 @@ def build_chat_standard_request(req_data: dict, *, default_model: str, surface: 
         tool_enabled=prompt_result.tool_enabled,
         tool_choice_mode=tool_choice.mode,
         required_tool_name=tool_choice.required_tool_name,
-        tool_choice_raw=tool_choice.raw,
+        tool_choice_raw=normalized_request.raw_tool_choice,
     )

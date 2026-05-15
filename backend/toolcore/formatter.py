@@ -7,7 +7,16 @@ from typing import Any
 from backend.services.token_calc import calculate_usage, completion_text_for_usage, count_tokens
 
 
-def build_canonical_openai_chat_payload(*, completion_id: str, created: int, model_name: str, prompt: str, answer_text: str, reasoning_text: str, directives: list[dict[str, Any]]) -> dict[str, Any]:
+def _client_tool_name(name: str, tool_catalog=None) -> str:
+    if tool_catalog is None:
+        return name
+    canonical = tool_catalog.get_canonical_name(name)
+    if canonical is None:
+        return name
+    return tool_catalog.get_client_name(canonical)
+
+
+def build_canonical_openai_chat_payload(*, completion_id: str, created: int, model_name: str, prompt: str, answer_text: str, reasoning_text: str, directives: list[dict[str, Any]], tool_catalog=None) -> dict[str, Any]:
     del reasoning_text
     tool_blocks = [block for block in directives if block.get("type") == "tool_use"]
     if tool_blocks:
@@ -19,7 +28,7 @@ def build_canonical_openai_chat_payload(*, completion_id: str, created: int, mod
                     "id": block["id"],
                     "type": "function",
                     "function": {
-                        "name": block["name"],
+                        "name": _client_tool_name(str(block["name"]), tool_catalog),
                         "arguments": json.dumps(block.get("input", {}), ensure_ascii=False),
                     },
                 }
@@ -40,7 +49,7 @@ def build_canonical_openai_chat_payload(*, completion_id: str, created: int, mod
     }
 
 
-def build_canonical_openai_responses_payload(*, response_id: str, created: int, model_name: str, prompt: str, answer_text: str, reasoning_text: str, directives: list[dict[str, Any]]) -> dict[str, Any]:
+def build_canonical_openai_responses_payload(*, response_id: str, created: int, model_name: str, prompt: str, answer_text: str, reasoning_text: str, directives: list[dict[str, Any]], tool_catalog=None) -> dict[str, Any]:
     tool_blocks = [block for block in directives if block.get("type") == "tool_use"]
     output: list[dict[str, Any]] = []
     if tool_blocks:
@@ -60,7 +69,7 @@ def build_canonical_openai_responses_payload(*, response_id: str, created: int, 
                 "type": "function_call",
                 "status": "completed",
                 "call_id": block["id"],
-                "name": block["name"],
+                "name": _client_tool_name(str(block["name"]), tool_catalog),
                 "arguments": json.dumps(block.get("input", {}), ensure_ascii=False),
             }
             for block in tool_blocks

@@ -5,6 +5,7 @@ from backend.toolcore.request_normalizer import (
     normalize_chat_request,
     normalize_gemini_request,
     normalize_responses_request,
+    to_prompt_payload,
 )
 from backend.toolcore.types import ToolChoicePolicy, ToolCoreRequest
 
@@ -75,6 +76,23 @@ class ChatRequestNormalizationTests(unittest.TestCase):
 
         self.assertEqual(result.tool_choice_policy, ToolChoicePolicy.FORCED)
         self.assertEqual(result.forced_tool_name, "get_weather")
+
+    def test_prompt_payload_uses_model_names_and_forced_choice_mapping(self) -> None:
+        result = normalize_chat_request(
+            {
+                "messages": [{"role": "user", "content": "run code"}],
+                "tools": [
+                    {"type": "function", "function": {"name": "exec", "description": "Run shell", "parameters": {}}},
+                    {"type": "function", "function": {"name": "read", "description": "Read file", "parameters": {}}},
+                ],
+                "tool_choice": {"type": "function", "function": {"name": "exec"}},
+            }
+        )
+
+        payload = to_prompt_payload(result, model="gpt-4.1")
+
+        self.assertEqual([tool["name"] for tool in payload["tools"]], ["gateway_tool_0", "gateway_tool_1"])
+        self.assertEqual(payload["tool_choice"], {"type": "function", "function": {"name": "gateway_tool_0"}})
 
     def test_chat_request_invalid_tool_choice_raises_error(self) -> None:
         with self.assertRaisesRegex(ValueError, "Invalid tool_choice"):

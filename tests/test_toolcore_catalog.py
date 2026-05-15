@@ -68,6 +68,25 @@ class ToolCatalogTests(unittest.TestCase):
         assert catalog is not None
         self.assertEqual(catalog.get_canonical_name("Read"), "Read")
 
+    def test_request_normalizer_assigns_dynamic_model_names(self) -> None:
+        request = normalize_chat_request(
+            {
+                "messages": [{"role": "user", "content": "use tools"}],
+                "tools": [
+                    {"type": "function", "function": {"name": "exec", "parameters": {}}},
+                    {"type": "function", "function": {"name": "image_generate", "parameters": {}}},
+                ],
+            }
+        )
+
+        self.assertEqual([tool.client_name for tool in request.tools], ["exec", "image_generate"])
+        self.assertEqual([tool.model_name for tool in request.tools], ["gateway_tool_0", "gateway_tool_1"])
+        catalog = request.tool_catalog
+        assert catalog is not None
+        self.assertEqual(catalog.get_canonical_name("gateway_tool_0"), "exec")
+        self.assertEqual(catalog.get_client_name("exec"), "exec")
+        self.assertEqual(catalog.get_model_name("image_generate"), "gateway_tool_1")
+
 
 if __name__ == "__main__":
     unittest.main()

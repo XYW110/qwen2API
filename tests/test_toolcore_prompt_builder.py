@@ -1,6 +1,7 @@
 import unittest
 
 from backend.services.client_profiles import CLAUDE_CODE_OPENAI_PROFILE, OPENCLAW_OPENAI_PROFILE, QWEN_CODE_OPENAI_PROFILE
+from backend.services.standard_request_builder import build_chat_standard_request
 from backend.toolcore.prompt_builder import _extract_text, _extract_user_text_only, messages_to_prompt
 
 
@@ -118,6 +119,43 @@ class ToolCorePromptBuilderTests(unittest.TestCase):
         self.assertNotIn("Human (CURRENT TASK - TOP PRIORITY): Read README.md and summarize it", result.prompt)
         self.assertLess(result.prompt.index("Read README.md and summarize it"), result.prompt.index("[Tool Result] id=call_1"))
         self.assertTrue(result.prompt.endswith("Assistant:"))
+
+    def test_standard_request_prompt_uses_gateway_names_for_tools_and_history(self) -> None:
+        req_data = {
+            "model": "gpt-4.1",
+            "messages": [
+                {"role": "user", "content": "Run a command"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "exec", "arguments": '{"command": "echo hi"}'},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "hi"},
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "exec",
+                        "description": "Run a shell command",
+                        "parameters": {"type": "object", "properties": {"command": {"type": "string"}}},
+                    },
+                }
+            ],
+        }
+
+        result = build_chat_standard_request(req_data, default_model="gpt-4.1", surface="openai")
+
+        self.assertIn("gateway_tool_0", result.prompt)
+        self.assertIn('<|DSML|invoke name="gateway_tool_0">', result.prompt)
+        self.assertNotIn('<|DSML|invoke name="exec">', result.prompt)
+        self.assertEqual(result.tool_names, ["gateway_tool_0"])
 
     def test_messages_to_prompt_preserves_openclaw_runtime_system_prose(self) -> None:
         req_data = {

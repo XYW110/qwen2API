@@ -191,6 +191,7 @@ def build_prompt_with_tools(
     client_profile: str = OPENCLAW_OPENAI_PROFILE,
     tool_choice_mode: str = "auto",
     required_tool_name: str | None = None,
+    tool_catalog=None,
 ) -> str:
     if tools and client_profile == QWEN_CODE_OPENAI_PROFILE:
         max_chars = 24000
@@ -282,6 +283,8 @@ def build_prompt_with_tools(
             for tc in msg["tool_calls"]:
                 function_data = tc.get("function", {})
                 name = function_data.get("name", "")
+                if tool_catalog is not None:
+                    name = tool_catalog.get_model_name(str(name)) or name
                 args_str = function_data.get("arguments", "{}")
                 try:
                     args = json.loads(args_str) if args_str else {}
@@ -409,6 +412,7 @@ def build_prompt_with_tools(
 
 def messages_to_prompt(req_data: dict, *, client_profile: str = OPENCLAW_OPENAI_PROFILE) -> PromptBuildResult:
     resolved_client_profile = client_profile
+    tool_catalog = req_data.get("_tool_catalog")
     raw_messages = req_data.get("messages", [])
     messages = []
     for message in raw_messages:
@@ -435,6 +439,7 @@ def messages_to_prompt(req_data: dict, *, client_profile: str = OPENCLAW_OPENAI_
             client_profile=resolved_client_profile,
             tool_choice_mode=tool_choice.mode,
             required_tool_name=tool_choice.required_tool_name,
+            tool_catalog=tool_catalog,
         ),
         tools=tools,
         tool_enabled=tool_enabled,

@@ -23,6 +23,7 @@ class OpenAIStreamTranslator:
         build_final_directive: Callable[[str], RuntimeToolDirective] | None = None,
         allowed_tool_names: list[str] | None = None,
         toolcore_enabled: bool = True,
+        tool_catalog=None,
     ):
         self.completion_id = completion_id
         self.created = created
@@ -31,6 +32,7 @@ class OpenAIStreamTranslator:
         self.build_final_directive = build_final_directive
         self.allowed_tool_names = {name for name in (allowed_tool_names or []) if isinstance(name, str) and name}
         self.toolcore_enabled = toolcore_enabled
+        self.tool_catalog = tool_catalog
         self.pending_chunks: list[str] = []
         self.role_chunk_sent = False
         self.emitted_tool_index = 0
@@ -103,6 +105,14 @@ class OpenAIStreamTranslator:
                 if event.type == "tool_calls" and event.calls:
                     self.emit_tool_calls(event.calls)
 
+    def _client_tool_name(self, name: str) -> str:
+        if self.tool_catalog is None:
+            return name
+        canonical = self.tool_catalog.get_canonical_name(name)
+        if canonical is None:
+            return name
+        return self.tool_catalog.get_client_name(canonical)
+
     def emit_tool_calls(self, tool_calls: list[dict[str, Any]]) -> None:
         self._ensure_role_chunk()
         if tool_calls and not self.tool_calls_emitted:
@@ -110,8 +120,9 @@ class OpenAIStreamTranslator:
         for tool_call in tool_calls:
             idx = self.emitted_tool_index
             self.emitted_tool_index += 1
+            tool_name = self._client_tool_name(str(tool_call['name']))
             self.pending_chunks.append(
-                f"data: {json.dumps({'id': self.completion_id, 'object': 'chat.completion.chunk', 'created': self.created, 'model': self.model_name, 'choices': [{'index': 0, 'delta': {'tool_calls': [{'index': idx, 'id': tool_call['id'], 'type': 'function', 'function': {'name': tool_call['name'], 'arguments': ''}}]}, 'finish_reason': None}]}, ensure_ascii=False)}\n\n"
+                f"data: {json.dumps({'id': self.completion_id, 'object': 'chat.completion.chunk', 'created': self.created, 'model': self.model_name, 'choices': [{'index': 0, 'delta': {'tool_calls': [{'index': idx, 'id': tool_call['id'], 'type': 'function', 'function': {'name': tool_name, 'arguments': ''}}]}, 'finish_reason': None}]}, ensure_ascii=False)}\n\n"
             )
             arguments = json.dumps(tool_call['input'], ensure_ascii=False)
             for start in range(0, len(arguments), TOOL_ARGUMENT_CHUNK_SIZE):

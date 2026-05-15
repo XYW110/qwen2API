@@ -517,6 +517,7 @@ async def chat_completions(request: Request):
                                         ),
                                         allowed_tool_names=standard_request.tool_names,
                                         toolcore_enabled=settings.TOOLCORE_V2_ENABLED,
+                                        tool_catalog=standard_request.tool_catalog,
                                     )
                                     staged_chunks = []
 
