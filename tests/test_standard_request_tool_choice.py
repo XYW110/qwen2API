@@ -78,6 +78,51 @@ class StandardRequestToolChoiceTests(unittest.TestCase):
                 surface="openai",
             )
 
+    def test_subagents_command_alias_is_not_exposed_when_agent_tools_exist(self) -> None:
+        request = build_chat_standard_request(
+            {
+                "model": "gpt-4.1",
+                "messages": [{"role": "user", "content": "list available subagents"}],
+                "tools": [
+                    {"type": "function", "function": {"name": "subagents", "parameters": {"type": "object"}}},
+                    {"type": "function", "function": {"name": "agents_list", "parameters": {"type": "object"}}},
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "sessions_spawn",
+                            "parameters": {"type": "object", "properties": {"task": {"type": "string"}}},
+                        },
+                    },
+                ],
+            },
+            default_model="gpt-4.1",
+            surface="openai",
+            client_profile="generic_openai",
+        )
+
+        self.assertEqual(request.tool_names, ["bridge-1", "bridge-2"])
+        self.assertIn("Bridge-call slots available: bridge-1, bridge-2", request.prompt)
+        self.assertNotIn("bridge-0", request.prompt)
+        self.assertIsNone(request.tool_catalog.get_model_name("subagents"))
+        self.assertEqual(request.tool_catalog.get_client_name("agents_list"), "agents_list")
+
+    def test_standalone_subagents_tool_is_preserved(self) -> None:
+        request = build_chat_standard_request(
+            {
+                "model": "gpt-4.1",
+                "messages": [{"role": "user", "content": "use the declared tool"}],
+                "tools": [
+                    {"type": "function", "function": {"name": "subagents", "parameters": {"type": "object"}}},
+                ],
+            },
+            default_model="gpt-4.1",
+            surface="openai",
+            client_profile="generic_openai",
+        )
+
+        self.assertEqual(request.tool_names, ["bridge-0"])
+        self.assertEqual(request.tool_catalog.get_model_name("subagents"), "bridge-0")
+
     def test_top_level_developer_and_instructions_are_preserved(self) -> None:
         request = build_chat_standard_request(
             {

@@ -41,12 +41,13 @@ def _model_tool_name(index: int) -> str:
     return f"bridge-{index}"
 
 
-def _normalize_tools(raw_tools: Any) -> list[ToolDefinition]:
+def _normalize_tools(raw_tools: Any, *, excluded_tool_names: set[str] | None = None) -> list[ToolDefinition]:
     if raw_tools is None:
         return []
     if not isinstance(raw_tools, list):
         raise ValueError("tools must be a list")
 
+    excluded = {name.strip().lower() for name in (excluded_tool_names or set()) if name.strip()}
     tools: list[ToolDefinition] = []
     for index, raw_tool in enumerate(raw_tools):
         if not isinstance(raw_tool, dict):
@@ -57,7 +58,7 @@ def _normalize_tools(raw_tools: Any) -> list[ToolDefinition]:
             or function_payload.get("name")
             or ""
         ).strip()
-        if not name:
+        if not name or name.lower() in excluded:
             continue
         description = str(
             raw_tool.get("description")
@@ -308,9 +309,9 @@ def _normalize_function_call_output(raw_output: Any) -> list[CanonicalToolResult
     return out
 
 
-def normalize_chat_request(req_data: dict[str, Any]) -> ToolCoreRequest:
+def normalize_chat_request(req_data: dict[str, Any], *, excluded_tool_names: set[str] | None = None) -> ToolCoreRequest:
     messages = _normalize_messages(req_data.get("messages"))
-    tools = _normalize_tools(req_data.get("tools"))
+    tools = _normalize_tools(req_data.get("tools"), excluded_tool_names=excluded_tool_names)
     tool_catalog = ToolCatalog(tools)
     declared_tool_names = {tool.name for tool in tools}
     raw_tool_choice = req_data.get("tool_choice")

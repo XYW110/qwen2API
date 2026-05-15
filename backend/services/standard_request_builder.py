@@ -8,10 +8,33 @@ from backend.toolcore.request_normalizer import normalize_chat_request, to_promp
 from backend.toolcall.normalize import build_tool_name_registry
 
 
+SUBAGENT_COMMAND_ALIAS_NAMES = frozenset({"subagents"})
+SUBAGENT_EXECUTABLE_TOOL_NAMES = frozenset({"agents_list", "sessions_spawn"})
+
+
+def _raw_declared_tool_names(req_data: dict) -> set[str]:
+    names: set[str] = set()
+    for raw_tool in req_data.get("tools", []) or []:
+        if not isinstance(raw_tool, dict):
+            continue
+        function_payload = raw_tool.get("function") if isinstance(raw_tool.get("function"), dict) else {}
+        name = str(raw_tool.get("name") or function_payload.get("name") or "").strip().lower()
+        if name:
+            names.add(name)
+    return names
+
+
+def _excluded_command_like_tool_names(req_data: dict) -> set[str] | None:
+    names = _raw_declared_tool_names(req_data)
+    if names & SUBAGENT_COMMAND_ALIAS_NAMES and names & SUBAGENT_EXECUTABLE_TOOL_NAMES:
+        return set(SUBAGENT_COMMAND_ALIAS_NAMES)
+    return None
+
+
 def build_chat_standard_request(req_data: dict, *, default_model: str, surface: str, client_profile: str = "openclaw_openai") -> StandardRequest:
     requested_model = req_data.get("model", default_model)
     effective_client_profile = infer_client_profile(req_data, fallback_profile=client_profile)
-    normalized_request = normalize_chat_request(req_data)
+    normalized_request = normalize_chat_request(req_data, excluded_tool_names=_excluded_command_like_tool_names(req_data))
     normalized_payload = to_prompt_payload(normalized_request, model=requested_model, stream=bool(req_data.get("stream", False)))
     for field_name in ("system", "developer", "instructions"):
         if field_name in req_data:
