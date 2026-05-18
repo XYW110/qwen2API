@@ -22,9 +22,22 @@ class ToolCoreContextOffloadTests(unittest.TestCase):
         self.assertEqual(plan.inline_messages, messages)
         self.assertEqual(plan.generated_files, [])
 
-    def test_plan_creates_file_mode_for_large_history(self) -> None:
+    def test_plan_keeps_large_history_inline_when_latest_user_is_small(self) -> None:
         messages = [
             {"role": "assistant", "content": "A" * 120},
+            {"role": "tool", "content": "tool output\n" * 20},
+            {"role": "user", "content": "latest task"},
+        ]
+
+        plan = self.offloader.plan(messages, tools=[], client_profile="openclaw_openai")
+
+        self.assertEqual(plan.mode, "inline")
+        self.assertEqual(plan.inline_messages, messages)
+        self.assertEqual(plan.generated_files, [])
+
+    def test_plan_creates_file_mode_for_large_latest_user_input(self) -> None:
+        messages = [
+            {"role": "assistant", "content": "A" * 40},
             {"role": "user", "content": "B" * 120},
         ]
 
@@ -35,10 +48,10 @@ class ToolCoreContextOffloadTests(unittest.TestCase):
         self.assertIn("Message 1 [assistant]", plan.generated_files[0].text)
         self.assertTrue(plan.inline_messages[0]["content"].endswith(SYSTEM_CONTEXT_PROMPT_NOTE))
 
-    def test_plan_rewrites_latest_user_message_with_note(self) -> None:
+    def test_plan_rewrites_large_latest_user_message_with_note(self) -> None:
         messages = [
-            {"role": "assistant", "content": "A" * 120},
-            {"role": "user", "content": "latest task"},
+            {"role": "assistant", "content": "A" * 40},
+            {"role": "user", "content": "latest task " * 12},
         ]
 
         plan = self.offloader.plan(messages, tools=[], client_profile="openclaw_openai")
@@ -46,10 +59,10 @@ class ToolCoreContextOffloadTests(unittest.TestCase):
         self.assertIn("latest task", plan.inline_messages[0]["content"])
         self.assertIn(SYSTEM_CONTEXT_PROMPT_NOTE, plan.inline_messages[0]["content"])
 
-    def test_plan_history_file_contains_latest_user_message(self) -> None:
+    def test_plan_history_file_contains_large_latest_user_message(self) -> None:
         messages = [
-            {"role": "assistant", "content": "A" * 120},
-            {"role": "user", "content": "latest task"},
+            {"role": "assistant", "content": "A" * 40},
+            {"role": "user", "content": "latest task " * 12},
         ]
 
         plan = self.offloader.plan(messages, tools=[], client_profile="openclaw_openai")

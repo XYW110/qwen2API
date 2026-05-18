@@ -174,6 +174,23 @@ class ToolStreamSieveTests(unittest.TestCase):
         text = "".join(event.get("text", "") for event in events if event.get("type") == "content")
         self.assertIn('##TOOL_CALL##', text)
 
+    def test_oversized_incomplete_dsml_capture_degrades_to_content(self) -> None:
+        sieve = ToolStreamSieve(["Read"])
+        events = sieve.process_chunk('<|DSML|tool_calls><|DSML|invoke name="Read">')
+        self.assertEqual(events, [])
+
+        emitted: list[dict[str, object]] = []
+        for _ in range(70):
+            emitted.extend(sieve.process_chunk("x" * 1024))
+            if emitted:
+                break
+
+        self.assertFalse(sieve.capturing)
+        self.assertFalse(any(event.get("type") == "tool_calls" for event in emitted))
+        text = "".join(str(event.get("text", "")) for event in emitted if event.get("type") == "content")
+        self.assertIn('<|DSML|tool_calls>', text)
+        self.assertGreater(len(text), 64 * 1024)
+
 
 if __name__ == "__main__":
     unittest.main()

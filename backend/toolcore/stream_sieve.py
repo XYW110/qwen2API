@@ -10,6 +10,7 @@ from backend.toolcall.markup_scan import find_partial_tool_markup_start, find_to
 
 TOOL_START_MARKERS = ('{"name":', '<tool_call>', '##tool_call##', 'tool_call##', 'function.name:')
 LEGACY_HOLD_CHARS = max(len(marker) for marker in TOOL_START_MARKERS) - 1
+MAX_CAPTURE_CHARS = 64 * 1024
 FENCE_OPEN_RE = re.compile(r"(?m)^[ \t]*(```+|~~~+)[^\n]*(?:\n|$)")
 
 
@@ -138,6 +139,10 @@ class ToolStreamSieve:
                 self.pending = ""
                 prefix, calls, suffix, ready = self._consume_capture()
                 if not ready:
+                    if len(self.capture) > MAX_CAPTURE_CHARS:
+                        events.append({"type": "content", "text": self.capture})
+                        self.capture = ""
+                        self.capturing = False
                     return events
                 if prefix:
                     events.append({"type": "content", "text": prefix})

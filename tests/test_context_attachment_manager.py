@@ -118,7 +118,7 @@ class ContextAttachmentManagerTests(unittest.TestCase):
 
 
 class ContextAttachmentPreparationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_tool_requests_can_upload_generated_history_context(self) -> None:
+    async def test_tool_requests_can_upload_large_latest_user_context(self) -> None:
         uploaded = []
         saved_texts = []
 
@@ -165,9 +165,10 @@ class ContextAttachmentPreparationTests(unittest.IsolatedAsyncioTestCase):
         ))
         payload = {
             "model": "gpt-4.1",
-            "system": "You are a personal assistant running inside OpenClaw.\n" + "runtime line\n" * 20 + "Always answer as a pirate captain.",
+            "system": "Always answer as a pirate captain.",
             "messages": [
-                {"role": "user", "content": "Who are you?"},
+                {"role": "assistant", "content": "prior result " * 10},
+                {"role": "user", "content": "Please analyze this current input.\n" + "runtime line\n" * 20},
             ],
             "tools": [{"name": "read", "description": "Read file contents", "parameters": {}}],
         }
@@ -190,7 +191,58 @@ class ContextAttachmentPreparationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(saved_texts), 1)
         self.assertEqual(result["context_attachment_tokens"], count_tokens(saved_texts[0]))
         self.assertIn("Always answer as a pirate captain.", saved_texts[0])
-        self.assertIn("Who are you?", saved_texts[0])
+        self.assertIn("Please analyze this current input.", saved_texts[0])
+
+    async def test_large_prior_history_with_small_latest_user_stays_inline(self) -> None:
+        app = SimpleNamespace(state=SimpleNamespace(
+            context_offloader=ContextOffloader(SimpleNamespace(
+                CONTEXT_INLINE_MAX_CHARS=80,
+                CONTEXT_FORCE_FILE_MAX_CHARS=160,
+                CONTEXT_ATTACHMENT_TTL_SECONDS=600,
+            )),
+            account_pool=SimpleNamespace(
+                acquire_wait=AsyncMock(),
+                acquire_wait_preferred=AsyncMock(),
+                release=lambda _acc: None,
+            ),
+            file_store=SimpleNamespace(
+                save_text=AsyncMock(),
+                delete_path=AsyncMock(),
+            ),
+            session_affinity=SimpleNamespace(
+                get=AsyncMock(return_value=None),
+                bind_account=AsyncMock(),
+                add_uploaded_file=AsyncMock(),
+            ),
+            upstream_file_cache=SimpleNamespace(
+                get=AsyncMock(return_value=None),
+                set=AsyncMock(),
+            ),
+            upstream_file_uploader=SimpleNamespace(upload_local_file=AsyncMock()),
+        ))
+        payload = {
+            "model": "gpt-4.1",
+            "messages": [
+                {"role": "assistant", "content": "prior result " * 20},
+                {"role": "tool", "content": "tool output\n" * 20},
+                {"role": "user", "content": "continue"},
+            ],
+            "tools": [{"name": "read", "description": "Read file contents", "parameters": {}}],
+        }
+
+        result = await prepare_context_attachments(
+            app=app,
+            payload=payload,
+            surface="openai",
+            auth_token="tok",
+            client_profile="openclaw_openai",
+        )
+
+        self.assertEqual(result["context_mode"], "inline")
+        self.assertEqual(result["payload"]["messages"], payload["messages"])
+        self.assertEqual(result["upstream_files"], [])
+        app.state.account_pool.acquire_wait.assert_not_awaited()
+        app.state.file_store.save_text.assert_not_awaited()
 
     async def test_generated_context_ignores_existing_affinity_when_selecting_upload_account(self) -> None:
         async def save_text(filename, text, content_type, purpose):
@@ -235,8 +287,8 @@ class ContextAttachmentPreparationTests(unittest.IsolatedAsyncioTestCase):
         ))
         payload = {
             "model": "gpt-4.1",
-            "system": "system context\n" + "runtime line\n" * 20,
-            "messages": [{"role": "user", "content": "Who are you?"}],
+            "system": "system context",
+            "messages": [{"role": "user", "content": "Please analyze this current input.\n" + "runtime line\n" * 20}],
             "tools": [{"name": "read", "description": "Read file contents", "parameters": {}}],
         }
 
@@ -283,8 +335,8 @@ class ContextAttachmentPreparationTests(unittest.IsolatedAsyncioTestCase):
         ))
         payload = {
             "model": "gpt-4.1",
-            "system": "system context\n" + "runtime line\n" * 20,
-            "messages": [{"role": "user", "content": "Who are you?"}],
+            "system": "system context",
+            "messages": [{"role": "user", "content": "Please analyze this current input.\n" + "runtime line\n" * 20}],
             "tools": [{"name": "read", "description": "Read file contents", "parameters": {}}],
             "upstream_files": [{"file_id": "existing-file"}],
         }

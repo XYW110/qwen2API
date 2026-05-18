@@ -683,10 +683,12 @@ async def collect_completion_run(
             if on_delta is not None:
                 await on_delta(evt, content, None)
             if request.tools:
-                join_started = time.perf_counter()
-                answer_text = "".join(answer_fragments)
-                join_elapsed = time.perf_counter() - join_started
-                if len(answer_fragments) % 3 == 0 or "does not exist" in content.lower():
+                answer_text = None
+                join_elapsed = 0.0
+                if "does not exist" in content.lower():
+                    join_started = time.perf_counter()
+                    answer_text = "".join(answer_fragments)
+                    join_elapsed = time.perf_counter() - join_started
                     blocked_started = time.perf_counter()
                     blocked_tool_names = extract_blocked_tool_names(answer_text.strip(), request.tool_names)
                     blocked_elapsed = time.perf_counter() - blocked_started
@@ -702,7 +704,9 @@ async def collect_completion_run(
                         )
                     if blocked_tool_names:
                         return _finalize_result(reason=f"blocked_tool_name:{blocked_tool_names[0]}")
-                if "##TOOL_CALL##" in answer_text or "<tool_call>" in answer_text:
+                if "##TOOL_CALL##" in content or "<tool_call>" in content:
+                    if answer_text is None:
+                        answer_text = "".join(answer_fragments)
                     directive = parse_tool_directive_once(
                         request,
                         RuntimeAttemptState(answer_text=answer_text, reasoning_text="".join(reasoning_fragments)),

@@ -82,12 +82,11 @@ class ContextOffloader:
 
     def plan(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None, client_profile: str = "") -> ContextOffloadPlan:
         estimated = self.estimate_prompt_len(messages, tools=tools, client_profile=client_profile)
-        if estimated <= self.settings.CONTEXT_INLINE_MAX_CHARS:
-            return ContextOffloadPlan(mode="inline", inline_messages=messages, estimated_prompt_len=estimated)
-
         user_messages = [message for message in messages if message.get("role") == "user"]
         latest_user = user_messages[-1] if user_messages else {"role": "user", "content": ""}
         latest_user_text = self._extract_text(latest_user)
+        if len(latest_user_text) <= self.settings.CONTEXT_INLINE_MAX_CHARS:
+            return ContextOffloadPlan(mode="inline", inline_messages=messages, estimated_prompt_len=estimated)
 
         serialized_parts: list[str] = []
         for idx, msg in enumerate(messages or [], 1):

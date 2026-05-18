@@ -1,7 +1,8 @@
 import unittest
+from unittest.mock import patch
 
 from backend.adapter.standard_request import StandardRequest
-from backend.runtime.execution import RuntimeAttemptState, extract_blocked_tool_names, parse_tool_directive_once
+from backend.runtime.execution import RuntimeAttemptState, collect_completion_run, extract_blocked_tool_names, parse_tool_directive_once
 from backend.toolcore.request_normalizer import normalize_chat_request
 
 
@@ -60,6 +61,31 @@ class ToolCoreSingleTrackNamingTests(unittest.TestCase):
         )
 
         self.assertEqual(request.tool_calls, [])
+
+
+class BlockedToolGuardStreamTests(unittest.IsolatedAsyncioTestCase):
+    async def test_plain_chunks_do_not_trigger_periodic_full_answer_blocked_scan(self) -> None:
+        class FakeClient:
+            async def chat_stream_events_with_retry(self, *args, **kwargs):
+                yield {"type": "meta", "chat_id": "chat-1", "acc": None}
+                for _ in range(9):
+                    yield {"type": "event", "event": {"type": "delta", "phase": "answer", "content": "plain output "}}
+
+        request = StandardRequest(
+            prompt="prompt",
+            response_model="gpt-4.1",
+            resolved_model="qwen3.6-plus",
+            surface="openai",
+            tools=[{"name": "Read", "parameters": {}}],
+            tool_names=["Read"],
+            tool_enabled=True,
+        )
+
+        with patch("backend.runtime.execution.extract_blocked_tool_names", wraps=extract_blocked_tool_names) as wrapped:
+            result = await collect_completion_run(FakeClient(), request, "prompt")
+
+        self.assertEqual(result.state.finish_reason, "stop")
+        self.assertEqual(wrapped.call_count, 1)
 
 
 if __name__ == "__main__":
