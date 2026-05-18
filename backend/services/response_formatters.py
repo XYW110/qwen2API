@@ -37,6 +37,35 @@ def sanitize_visible_answer_text(answer_text: str, *, tool_use: bool) -> str:
     return text[:min(positions)].strip()
 
 
+def _client_visible_tool_name(name: str, tool_catalog) -> str:
+    if tool_catalog is None:
+        return name
+    canonical = tool_catalog.get_canonical_name(name)
+    if canonical is None:
+        return name
+    return tool_catalog.get_client_name(canonical)
+
+
+def _client_visible_tools(tools: list[dict[str, Any]], tool_catalog) -> list[dict[str, Any]]:
+    visible_tools: list[dict[str, Any]] = []
+    for tool in tools or []:
+        if not isinstance(tool, dict):
+            continue
+        visible = dict(tool)
+        if isinstance(visible.get("function"), dict):
+            function_payload = dict(visible["function"])
+            name = str(function_payload.get("name") or "")
+            if name:
+                function_payload["name"] = _client_visible_tool_name(name, tool_catalog)
+            visible["function"] = function_payload
+        else:
+            name = str(visible.get("name") or "")
+            if name:
+                visible["name"] = _client_visible_tool_name(name, tool_catalog)
+        visible_tools.append(visible)
+    return visible_tools
+
+
 def build_openai_completion_payload(*, completion_id: str, created: int, model_name: str, prompt: str, execution, standard_request) -> dict[str, Any]:
     directive = build_tool_directive(standard_request, execution.state)
     payload = build_canonical_openai_chat_payload(
@@ -95,12 +124,13 @@ def build_openai_response_payload(
         extra_prompt_tokens=standard_request.context_attachment_tokens,
     )
     if standard_request.required_tool_name:
-        payload["tool_choice"] = {"type": "function", "function": {"name": standard_request.required_tool_name}}
+        name = _client_visible_tool_name(standard_request.required_tool_name, standard_request.tool_catalog)
+        payload["tool_choice"] = {"type": "function", "function": {"name": name}}
     elif standard_request.tool_choice_raw is not None:
         payload["tool_choice"] = standard_request.tool_choice_raw
     else:
         payload["tool_choice"] = standard_request.tool_choice_mode or "auto"
-    payload["tools"] = standard_request.tools or []
+    payload["tools"] = _client_visible_tools(standard_request.tools or [], standard_request.tool_catalog)
     payload["previous_response_id"] = previous_response_id
     payload["store"] = store
     payload["reasoning"] = {"effort": None, "summary": None}
@@ -127,6 +157,7 @@ def build_anthropic_message_payload(*, msg_id: str, model_name: str, prompt: str
         answer_text=execution.state.answer_text,
         reasoning_text=execution.state.reasoning_text,
         directives=directive.tool_blocks,
+        tool_catalog=standard_request.tool_catalog,
         extra_prompt_tokens=standard_request.context_attachment_tokens,
     )
 

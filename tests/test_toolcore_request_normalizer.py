@@ -77,7 +77,7 @@ class ChatRequestNormalizationTests(unittest.TestCase):
         self.assertEqual(result.tool_choice_policy, ToolChoicePolicy.FORCED)
         self.assertEqual(result.forced_tool_name, "get_weather")
 
-    def test_prompt_payload_uses_model_names_and_forced_choice_mapping(self) -> None:
+    def test_prompt_payload_uses_bridge_slots_and_forced_choice_mapping(self) -> None:
         result = normalize_chat_request(
             {
                 "messages": [{"role": "user", "content": "run code"}],
@@ -93,6 +93,8 @@ class ChatRequestNormalizationTests(unittest.TestCase):
 
         self.assertEqual([tool["name"] for tool in payload["tools"]], ["bridge-0", "bridge-1"])
         self.assertEqual(payload["tool_choice"], {"type": "function", "function": {"name": "bridge-0"}})
+        self.assertEqual(result.tool_catalog.get_client_name("exec"), "exec")
+        self.assertEqual(result.tool_catalog.get_model_name("read"), "bridge-1")
 
     def test_chat_request_invalid_tool_choice_raises_error(self) -> None:
         with self.assertRaisesRegex(ValueError, "Invalid tool_choice"):
@@ -191,8 +193,23 @@ class CrossSurfaceNormalizationTests(unittest.TestCase):
         )
 
         self.assertEqual([tool.name for tool in result.tools], ["Read"])
+        self.assertEqual([tool.model_name for tool in result.tools], ["bridge-0"])
         self.assertEqual(result.tool_choice_policy, ToolChoicePolicy.FORCED)
         self.assertEqual(result.forced_tool_name, "Read")
+
+    def test_anthropic_prompt_payload_maps_forced_tool_choice_to_bridge_slot(self) -> None:
+        result = normalize_anthropic_request(
+            {
+                "messages": [{"role": "user", "content": "read the file"}],
+                "tools": [{"name": "Read", "description": "Read file", "input_schema": {"type": "object"}}],
+                "tool_choice": {"type": "tool", "name": "Read"},
+            }
+        )
+
+        payload = to_prompt_payload(result, model="claude-3-5-sonnet")
+
+        self.assertEqual([tool["name"] for tool in payload["tools"]], ["bridge-0"])
+        self.assertEqual(payload["tool_choice"], {"type": "function", "function": {"name": "bridge-0"}})
 
     def test_gemini_request_normalizes_to_same_toolcore_shape(self) -> None:
         result = normalize_gemini_request(
@@ -207,6 +224,7 @@ class CrossSurfaceNormalizationTests(unittest.TestCase):
 
         self.assertEqual(result.messages, [{"role": "user", "content": "read the file"}])
         self.assertEqual([tool.name for tool in result.tools], ["Read"])
+        self.assertEqual([tool.model_name for tool in result.tools], ["bridge-0"])
         self.assertEqual(result.tool_choice_policy, ToolChoicePolicy.REQUIRED)
 
     def test_equivalent_requests_across_surfaces_produce_equivalent_core_fields(self) -> None:

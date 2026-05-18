@@ -93,11 +93,17 @@ def _raw_text_content(content: Any) -> str:
     return ""
 
 
-def _assistant_tool_call_markup(message: dict[str, Any], client_profile: str) -> str:
+def _model_tool_name(name: str, tool_catalog) -> str:
+    if tool_catalog is None:
+        return name
+    return tool_catalog.get_model_name(name) or name
+
+
+def _assistant_tool_call_markup(message: dict[str, Any], client_profile: str, tool_catalog=None) -> str:
     tc_parts: list[str] = []
     for tc in message.get("tool_calls", []) or []:
         fn = tc.get("function", {}) if isinstance(tc, dict) else {}
-        name = fn.get("name", "")
+        name = _model_tool_name(str(fn.get("name", "")), tool_catalog)
         args_str = fn.get("arguments", "{}")
         try:
             args = json.loads(args_str)
@@ -107,7 +113,7 @@ def _assistant_tool_call_markup(message: dict[str, Any], client_profile: str) ->
     return "\n".join(part for part in tc_parts if part)
 
 
-def render_session_message(message: dict[str, Any], *, client_profile: str, tools_enabled: bool) -> str:
+def render_session_message(message: dict[str, Any], *, client_profile: str, tools_enabled: bool, tool_catalog=None) -> str:
     role = message.get("role", "")
     if role not in ("user", "assistant", "system", "developer", "tool"):
         return ""
@@ -140,7 +146,7 @@ def render_session_message(message: dict[str, Any], *, client_profile: str, tool
     )
 
     if role == "assistant" and not text and message.get("tool_calls"):
-        text = _assistant_tool_call_markup(message, client_profile)
+        text = _assistant_tool_call_markup(message, client_profile, tool_catalog=tool_catalog)
 
     if not str(text or "").strip():
         return ""
@@ -155,10 +161,15 @@ def render_session_message(message: dict[str, Any], *, client_profile: str, tool
     return text if is_tool_result_only_user_msg else f"{prefix}{text}"
 
 
-def extract_session_history_entries(messages: list[dict[str, Any]], *, client_profile: str, tools_enabled: bool) -> list[SessionHistoryEntry]:
+def extract_session_history_entries(messages: list[dict[str, Any]], *, client_profile: str, tools_enabled: bool, tool_catalog=None) -> list[SessionHistoryEntry]:
     entries: list[SessionHistoryEntry] = []
     for message in messages or []:
-        rendered = render_session_message(message, client_profile=client_profile, tools_enabled=tools_enabled).strip()
+        rendered = render_session_message(
+            message,
+            client_profile=client_profile,
+            tools_enabled=tools_enabled,
+            tool_catalog=tool_catalog,
+        ).strip()
         if not rendered:
             continue
         digest = hashlib.sha256(rendered.encode("utf-8", errors="ignore")).hexdigest()
@@ -289,6 +300,7 @@ async def plan_persistent_session_turn(*, app, request: StandardRequest, payload
         messages_for_hash,
         client_profile=request.client_profile,
         tools_enabled=bool(request.tools),
+        tool_catalog=request.tool_catalog,
     )
     current_hashes = [entry.digest for entry in entries]
 
@@ -406,7 +418,12 @@ def build_openai_assistant_history_message(*, execution, request: StandardReques
 
 
 def extend_hashes_with_assistant(*, current_hashes: list[str], assistant_message: dict[str, Any], request: StandardRequest) -> list[str]:
-    entries = extract_session_history_entries([assistant_message], client_profile=request.client_profile, tools_enabled=bool(request.tools))
+    entries = extract_session_history_entries(
+        [assistant_message],
+        client_profile=request.client_profile,
+        tools_enabled=bool(request.tools),
+        tool_catalog=request.tool_catalog,
+    )
     if not entries:
         return list(current_hashes)
     return list(current_hashes) + [entry.digest for entry in entries]

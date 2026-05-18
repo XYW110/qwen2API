@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
 from backend.adapter.standard_request import CLAUDE_CODE_OPENAI_PROFILE
+from backend.toolcore.prompt_contract import model_bridge_tool_name, normalize_prompt_tool
 
 SYSTEM_CONTEXT_FILE_PREFIX = "qwen2api_context"
 SYSTEM_CONTEXT_PROMPT_NOTE = (
     "Generated system context files may be attached with opaque filenames. "
     "Use them as supporting context. User-uploaded files are separate user inputs and should also be respected."
 )
+TOOLS_CONTEXT_FILE_PREFIX = "qwen2api_tools"
+TOOLS_CONTEXT_TITLE = "# QWEN2API_TOOLS.txt"
+TOOLS_CONTEXT_SUMMARY = "Available tool descriptions and parameter schemas for this request."
 
 
 @dataclass(slots=True)
@@ -80,6 +85,24 @@ class ContextOffloader:
             sha256=hashlib.sha256(data).hexdigest(),
         )
 
+    def _tools_context_text(self, tools: list[dict[str, Any]] | None) -> str:
+        tool_blocks: list[str] = []
+        for raw_tool in tools or []:
+            if not isinstance(raw_tool, dict):
+                continue
+            tool = normalize_prompt_tool(raw_tool)
+            raw_name = str(tool.get("name") or "").strip()
+            if not raw_name:
+                continue
+            name = raw_name if raw_name.startswith("bridge-") else model_bridge_tool_name(len(tool_blocks))
+            description = str(tool.get("description") or "No description available")
+            parameters = tool.get("parameters") or {}
+            schema = json.dumps(parameters if isinstance(parameters, dict) else {}, ensure_ascii=False)
+            tool_blocks.append(f"Tool: {name}\nDescription: {description}\nParameters: {schema}")
+        if not tool_blocks:
+            return ""
+        return "\n".join([TOOLS_CONTEXT_TITLE, TOOLS_CONTEXT_SUMMARY, "", "\n\n".join(tool_blocks), ""])
+
     def plan(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None, client_profile: str = "") -> ContextOffloadPlan:
         estimated = self.estimate_prompt_len(messages, tools=tools, client_profile=client_profile)
         user_messages = [message for message in messages if message.get("role") == "user"]
@@ -110,6 +133,16 @@ class ContextOffloader:
                     f"{SYSTEM_CONTEXT_FILE_PREFIX}_history",
                     "txt",
                     attachment_text,
+                    "text/plain",
+                )
+            )
+        tools_text = self._tools_context_text(tools)
+        if tools_text:
+            generated_files.append(
+                self._make_file(
+                    TOOLS_CONTEXT_FILE_PREFIX,
+                    "txt",
+                    tools_text,
                     "text/plain",
                 )
             )

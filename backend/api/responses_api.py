@@ -171,7 +171,7 @@ async def create_response(request: Request):
     with request_context(req_id=new_request_id(), surface="responses", requested_model=model_name, resolved_model=standard_request.resolved_model):
         if standard_request.stream:
             async def generate():
-                translator = ResponsesStreamTranslator(response_id=response_id, created=created, model_name=model_name)
+                translator = ResponsesStreamTranslator(response_id=response_id, created=created, model_name=model_name, tool_catalog=standard_request.tool_catalog)
                 translator.start()
                 for chunk in translator.pending_chunks:
                     yield chunk
@@ -396,7 +396,7 @@ async def create_response_websocket(websocket: WebSocket):
         history_messages = prepared.combined_messages
 
         with request_context(req_id=new_request_id(), surface="responses_ws", requested_model=model_name, resolved_model=standard_request.resolved_model):
-            translator = ResponsesStreamTranslator(response_id=response_id, created=created, model_name=model_name)
+            translator = ResponsesStreamTranslator(response_id=response_id, created=created, model_name=model_name, tool_catalog=standard_request.tool_catalog)
             translator.start()
             for chunk in translator.pending_chunks:
                 await websocket.send_json(sse_chunk_to_payload(chunk))

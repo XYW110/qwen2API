@@ -23,7 +23,7 @@ from backend.services.context_attachment_manager import prepare_context_attachme
 from backend.services.attachment_preprocessor import preprocess_attachments
 from backend.services.client_profiles import CLAUDE_CODE_OPENAI_PROFILE
 from backend.toolcore.prompt_builder import messages_to_prompt
-from backend.services.response_formatters import build_anthropic_message_payload
+from backend.services.response_formatters import _client_visible_tool_name, build_anthropic_message_payload
 from backend.services.qwen_client import QwenClient
 from backend.services.token_calc import count_tokens
 from backend.adapter.standard_request import normalize_tool_choice
@@ -147,7 +147,7 @@ def _build_standard_request(req_data: dict) -> StandardRequest:
     prompt = prompt_result.prompt
     tools = prompt_result.tools
     tool_names = [tool_name for tool_name in (tool.get("name") for tool in tools) if isinstance(tool_name, str) and tool_name]
-    tool_choice = normalize_tool_choice(normalized_request.raw_tool_choice)
+    tool_choice = normalize_tool_choice(normalized_payload.get("tool_choice"))
     tool_choice = enforce_declared_tool_choice(tool_choice, tool_names)
     return StandardRequest(
         prompt=prompt,
@@ -330,7 +330,7 @@ async def anthropic_messages(request: Request):
                                         return
                                     stream_state.append_tool_delta(
                                         tool_call_id=str(tool_call_id),
-                                        tool_name=str(tool_name),
+                                        tool_name=_client_visible_tool_name(str(tool_name), standard_request.tool_catalog),
                                         partial_json=evt.get("content", ""),
                                     )
 
@@ -392,7 +392,10 @@ async def anthropic_messages(request: Request):
                                 tool_id = block.get("id")
                                 if tool_id in stream_state.opened_tool_calls:
                                     continue
-                                index = stream_state.open_tool_block(str(tool_id), str(block.get("name", "")))
+                                index = stream_state.open_tool_block(
+                                    str(tool_id),
+                                    _client_visible_tool_name(str(block.get("name", "")), standard_request.tool_catalog),
+                                )
                                 stream_state.pending_chunks.append(
                                     stream_presenter.anthropic_content_block_delta(index, {'type': 'input_json_delta', 'partial_json': json.dumps(block.get('input', {}), ensure_ascii=False)})
                                 )

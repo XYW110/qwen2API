@@ -170,7 +170,16 @@ class ContextAttachmentPreparationTests(unittest.IsolatedAsyncioTestCase):
                 {"role": "assistant", "content": "prior result " * 10},
                 {"role": "user", "content": "Please analyze this current input.\n" + "runtime line\n" * 20},
             ],
-            "tools": [{"name": "read", "description": "Read file contents", "parameters": {}}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "read",
+                        "description": "Read file contents",
+                        "parameters": {"type": "object", "properties": {"file_path": {"type": "string"}}},
+                    },
+                }
+            ],
         }
 
         result = await prepare_context_attachments(
@@ -182,16 +191,83 @@ class ContextAttachmentPreparationTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(result["context_mode"], "file")
-        self.assertEqual(len(result["upstream_files"]), 1)
+        self.assertEqual(len(result["upstream_files"]), 2)
         uploaded_filename = result["upstream_files"][0]["filename"]
         self.assertRegex(uploaded_filename, r"^[0-9a-f]{32}\.txt$")
         self.assertNotIn("qwen2api", uploaded_filename)
         self.assertNotIn("context", uploaded_filename)
-        self.assertEqual(len(uploaded), 1)
-        self.assertEqual(len(saved_texts), 1)
-        self.assertEqual(result["context_attachment_tokens"], count_tokens(saved_texts[0]))
-        self.assertIn("Always answer as a pirate captain.", saved_texts[0])
-        self.assertIn("Please analyze this current input.", saved_texts[0])
+        self.assertEqual(len(uploaded), 2)
+        self.assertEqual(len(saved_texts), 2)
+        self.assertEqual(result["context_attachment_tokens"], sum(count_tokens(text) for text in saved_texts))
+        history_text = next(text for text in saved_texts if "Please analyze this current input." in text)
+        tools_text = next(text for text in saved_texts if "Available tool descriptions" in text)
+        self.assertIn("Always answer as a pirate captain.", history_text)
+        self.assertIn("Please analyze this current input.", history_text)
+        self.assertIn("Tool: bridge-0", tools_text)
+        self.assertNotIn("Tool: read", tools_text)
+        self.assertIn("Read file contents", tools_text)
+
+    async def test_generated_tools_context_matches_filtered_bridge_slots(self) -> None:
+        saved_texts = []
+
+        async def save_text(filename, text, content_type, purpose):
+            saved_texts.append(text)
+            return {
+                "id": filename,
+                "path": f"/tmp/{filename}",
+                "filename": filename,
+                "content_type": content_type,
+                "sha256": "sha-history",
+                "created_at": 1,
+            }
+
+        app = SimpleNamespace(state=SimpleNamespace(
+            context_offloader=ContextOffloader(SimpleNamespace(
+                CONTEXT_INLINE_MAX_CHARS=80,
+                CONTEXT_FORCE_FILE_MAX_CHARS=160,
+                CONTEXT_ATTACHMENT_TTL_SECONDS=600,
+            )),
+            account_pool=SimpleNamespace(
+                acquire_wait=AsyncMock(return_value=SimpleNamespace(email="bot@example.com")),
+                acquire_wait_preferred=AsyncMock(return_value=SimpleNamespace(email="bot@example.com")),
+                release=lambda _acc: None,
+            ),
+            file_store=SimpleNamespace(save_text=save_text, delete_path=AsyncMock()),
+            session_affinity=SimpleNamespace(
+                get=AsyncMock(return_value=None),
+                bind_account=AsyncMock(),
+                add_uploaded_file=AsyncMock(),
+            ),
+            upstream_file_cache=SimpleNamespace(get=AsyncMock(return_value=None), set=AsyncMock()),
+            upstream_file_uploader=SimpleNamespace(
+                upload_local_file=AsyncMock(return_value={"remote_ref": {"file_id": "file-id", "filename": "ctx.txt"}})
+            ),
+        ))
+        payload = {
+            "model": "gpt-4.1",
+            "messages": [{"role": "user", "content": "Please analyze this current input.\n" + "runtime line\n" * 20}],
+            "tools": [
+                {"type": "function", "function": {"name": "subagents", "description": "Subagent alias", "parameters": {"type": "object"}}},
+                {"type": "function", "function": {"name": "agents_list", "description": "List agents", "parameters": {"type": "object"}}},
+                {"type": "function", "function": {"name": "sessions_spawn", "description": "Spawn session", "parameters": {"type": "object", "properties": {"task": {"type": "string"}}}}},
+            ],
+        }
+
+        await prepare_context_attachments(
+            app=app,
+            payload=payload,
+            surface="openai",
+            auth_token="tok",
+            client_profile="generic_openai",
+        )
+
+        tools_text = next(text for text in saved_texts if "Available tool descriptions" in text)
+        self.assertIn("Tool: bridge-0", tools_text)
+        self.assertIn("List agents", tools_text)
+        self.assertIn("Tool: bridge-1", tools_text)
+        self.assertIn("Spawn session", tools_text)
+        self.assertNotIn("Subagent alias", tools_text)
+        self.assertNotIn("Tool: bridge-2", tools_text)
 
     async def test_large_prior_history_with_small_latest_user_stays_inline(self) -> None:
         app = SimpleNamespace(state=SimpleNamespace(

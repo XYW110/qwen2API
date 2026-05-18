@@ -27,6 +27,7 @@ class StandardRequestToolChoiceTests(unittest.TestCase):
         self.assertEqual(request.tool_choice_mode, "required")
         self.assertEqual(request.required_tool_name, "bridge-0")
         self.assertEqual(request.tool_choice_raw, {"type": "function", "function": {"name": "Read"}})
+        self.assertEqual(request.tool_catalog.get_client_name("Read"), "Read")
 
     def test_required_tool_choice_adds_prompt_constraint(self) -> None:
         request = build_chat_standard_request(
@@ -100,9 +101,10 @@ class StandardRequestToolChoiceTests(unittest.TestCase):
             client_profile="generic_openai",
         )
 
-        self.assertEqual(request.tool_names, ["bridge-1", "bridge-2"])
-        self.assertIn("Bridge-call slots available: bridge-1, bridge-2", request.prompt)
-        self.assertNotIn("bridge-0", request.prompt)
+        self.assertEqual(request.tool_names, ["bridge-0", "bridge-1"])
+        self.assertIn("Bridge-call slots available: bridge-0, bridge-1", request.prompt)
+        self.assertNotIn("Bridge-call slots available: subagents", request.prompt)
+        self.assertNotIn("- subagents", request.prompt)
         self.assertIsNone(request.tool_catalog.get_model_name("subagents"))
         self.assertEqual(request.tool_catalog.get_client_name("agents_list"), "agents_list")
 

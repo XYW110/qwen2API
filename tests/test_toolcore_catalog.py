@@ -68,7 +68,7 @@ class ToolCatalogTests(unittest.TestCase):
         assert catalog is not None
         self.assertEqual(catalog.get_canonical_name("Read"), "Read")
 
-    def test_request_normalizer_assigns_dynamic_model_names(self) -> None:
+    def test_request_normalizer_uses_bridge_model_names_for_model_prompt(self) -> None:
         request = normalize_chat_request(
             {
                 "messages": [{"role": "user", "content": "use tools"}],

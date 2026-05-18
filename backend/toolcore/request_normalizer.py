@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from backend.toolcore.prompt_contract import model_bridge_tool_name
 from backend.toolcore.types import (
     CanonicalToolCall,
     CanonicalToolResult,
@@ -35,10 +36,6 @@ def _normalize_messages(raw_messages: Any) -> list[dict[str, Any]]:
     if isinstance(raw_messages, dict):
         return [raw_messages]
     raise ValueError("messages/input must be a string, object, or list")
-
-
-def _model_tool_name(index: int) -> str:
-    return f"bridge-{index}"
 
 
 def _normalize_tools(raw_tools: Any, *, excluded_tool_names: set[str] | None = None) -> list[ToolDefinition]:
@@ -76,7 +73,7 @@ def _normalize_tools(raw_tools: Any, *, excluded_tool_names: set[str] | None = N
                 description=description,
                 parameters=parameters,
                 client_name=name,
-                model_name=_model_tool_name(index),
+                model_name=model_bridge_tool_name(len(tools)),
                 raw=raw_tool,
             )
         )
@@ -104,7 +101,7 @@ def _normalize_anthropic_tools(raw_tools: Any) -> list[ToolDefinition]:
                 description=description,
                 parameters=parameters,
                 client_name=name,
-                model_name=name,
+                model_name=model_bridge_tool_name(len(tools)),
                 raw=raw_tool,
             )
         )
@@ -161,7 +158,7 @@ def _normalize_gemini_tools(raw_tools: Any) -> list[ToolDefinition]:
                     description=description,
                     parameters=parameters,
                     client_name=name,
-                    model_name=name,
+                    model_name=model_bridge_tool_name(len(tools)),
                     raw=declaration,
                 )
             )

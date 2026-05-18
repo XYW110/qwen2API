@@ -79,6 +79,10 @@ def render_history_tool_call(name: str, input_data: dict[str, Any], client_profi
     return "\n".join(lines)
 
 
+def model_bridge_tool_name(index: int) -> str:
+    return f"bridge-{index}"
+
+
 def normalize_prompt_tool(tool: dict[str, Any]) -> dict[str, Any]:
     if tool.get("type") == "function" and "function" in tool:
         fn = tool["function"]

@@ -79,7 +79,9 @@ class AnthropicToolCoreIntegrationTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(request.tool_names, ["Read"])
+        self.assertEqual(request.tool_names, ["bridge-0"])
+        self.assertIn("Bridge-call slots available: bridge-0", request.prompt)
+        self.assertNotIn("Bridge-call slots available: Read", request.prompt)
         self.assertEqual(request.tools[0]["parameters"], {"type": "object", "properties": {"file_path": {"type": "string"}}})
 
     def test_anthropic_stream_usage_uses_token_counts(self) -> None:
@@ -115,7 +117,7 @@ class AnthropicToolCoreIntegrationTests(unittest.TestCase):
                 "tools": [{"name": "Read", "description": "Read file", "input_schema": {}}],
             }
         )
-        execution = SimpleNamespace(state=SimpleNamespace(answer_text="", reasoning_text="", tool_calls=[{"id": "call_123", "name": "Read", "input": {"file_path": "README.md"}}]))
+        execution = SimpleNamespace(state=SimpleNamespace(answer_text="", reasoning_text="", tool_calls=[{"id": "call_123", "name": "bridge-0", "input": {"file_path": "README.md"}}]))
 
         payload = build_anthropic_message_payload(
             msg_id="msg_123",

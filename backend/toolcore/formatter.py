@@ -103,11 +103,18 @@ def build_canonical_openai_responses_payload(*, response_id: str, created: int, 
     }
 
 
-def build_canonical_anthropic_message(*, msg_id: str, model_name: str, prompt: str, answer_text: str, reasoning_text: str, directives: list[dict[str, Any]], extra_prompt_tokens: int = 0) -> dict[str, Any]:
+def build_canonical_anthropic_message(*, msg_id: str, model_name: str, prompt: str, answer_text: str, reasoning_text: str, directives: list[dict[str, Any]], tool_catalog=None, extra_prompt_tokens: int = 0) -> dict[str, Any]:
     content_blocks: list[dict[str, Any]] = []
     if reasoning_text:
         content_blocks.append({"type": "thinking", "thinking": reasoning_text})
-    content_blocks.extend(directives if directives else ([{"type": "text", "text": answer_text}] if answer_text else []))
+    if directives:
+        for directive in directives:
+            block = dict(directive)
+            if block.get("type") == "tool_use" and block.get("name"):
+                block["name"] = _client_tool_name(str(block["name"]), tool_catalog)
+            content_blocks.append(block)
+    elif answer_text:
+        content_blocks.append({"type": "text", "text": answer_text})
     return {
         "id": msg_id,
         "type": "message",

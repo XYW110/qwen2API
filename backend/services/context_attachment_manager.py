@@ -9,7 +9,9 @@ from typing import Any
 from backend.core.upstream_file_cache import UpstreamFileCacheEntry
 from backend.services.client_profiles import user_role_system_text
 from backend.services.token_calc import count_tokens
+from backend.services.standard_request_builder import _excluded_command_like_tool_names
 from backend.toolcore.context_offload import SYSTEM_CONTEXT_FILE_PREFIX, SYSTEM_CONTEXT_PROMPT_NOTE
+from backend.toolcore.request_normalizer import normalize_chat_request, to_prompt_payload
 
 
 log = logging.getLogger("qwen2api.context_attachment_manager")
@@ -120,6 +122,22 @@ def _fallback_context_attachment_result(
     }
 
 
+def _context_tools_for_payload(payload: dict[str, Any], surface: str) -> list[dict[str, Any]]:
+    tools = payload.get("tools", []) or []
+    if surface not in {"openai", "responses"}:
+        return tools
+    try:
+        normalized = normalize_chat_request(payload, excluded_tool_names=_excluded_command_like_tool_names(payload))
+        prompt_payload = to_prompt_payload(
+            normalized,
+            model=str(payload.get("model") or ""),
+            stream=bool(payload.get("stream", False)),
+        )
+        return prompt_payload.get("tools", []) or []
+    except Exception:
+        return tools
+
+
 async def prepare_context_attachments(*, app, payload: dict[str, Any], surface: str, auth_token: str, client_profile: str, existing_attachments=None) -> dict[str, Any]:
     context_offloader = app.state.context_offloader
     account_pool = app.state.account_pool
@@ -129,7 +147,7 @@ async def prepare_context_attachments(*, app, payload: dict[str, Any], surface: 
     uploader = app.state.upstream_file_uploader
 
     session_key = derive_session_key(surface, auth_token, payload)
-    tools = payload.get("tools", []) or []
+    tools = _context_tools_for_payload(payload, surface)
     messages = payload.get("messages", []) or []
     context_messages = _context_messages_for_payload(payload)
     manual_attachments = list(existing_attachments or [])

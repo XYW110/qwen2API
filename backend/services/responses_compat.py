@@ -9,7 +9,7 @@ from typing import Any
 
 from backend.adapter.standard_request import StandardRequest
 from backend.runtime.execution import build_tool_directive
-from backend.services.response_formatters import sanitize_visible_answer_text
+from backend.services.response_formatters import _client_visible_tool_name, sanitize_visible_answer_text
 from backend.toolcore.roundtrip import (
     build_response_function_call_item,
     response_function_call_to_message,
@@ -159,10 +159,11 @@ def sse_chunk_to_payload(chunk: str) -> dict[str, Any]:
 
 
 class ResponsesStreamTranslator:
-    def __init__(self, *, response_id: str, created: int, model_name: str) -> None:
+    def __init__(self, *, response_id: str, created: int, model_name: str, tool_catalog=None) -> None:
         self.response_id = response_id
         self.created = created
         self.model_name = model_name
+        self.tool_catalog = tool_catalog
         self.sequence_number = 0
         self.pending_chunks: list[str] = []
         self.text_item_id = f"msg_{uuid.uuid4().hex[:24]}"
@@ -269,7 +270,8 @@ class ResponsesStreamTranslator:
             input_data = tool_call.get("input", {}) if isinstance(tool_call.get("input", {}), dict) else {}
             if not call_id or not name or call_id in self.streamed_tool_item_ids:
                 continue
-            item = build_response_function_call_item(call_id=call_id, name=name, input_data=input_data)
+            client_name = _client_visible_tool_name(name, self.tool_catalog)
+            item = build_response_function_call_item(call_id=call_id, name=client_name, input_data=input_data)
             arguments = item["arguments"]
             self.pending_chunks.append(sse_event({"type": "response.output_item.added", "sequence_number": self._next_sequence(), "output_index": 0, "item": item}))
             self.pending_chunks.append(sse_event({"type": "response.function_call_arguments.delta", "sequence_number": self._next_sequence(), "item_id": item["id"], "output_index": 0, "delta": ""}))

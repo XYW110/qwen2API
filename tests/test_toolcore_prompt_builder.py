@@ -122,7 +122,7 @@ class ToolCorePromptBuilderTests(unittest.TestCase):
         self.assertLess(result.prompt.index("Read README.md and summarize it"), result.prompt.index("[Tool Result] id=call_1"))
         self.assertTrue(result.prompt.endswith("Assistant:"))
 
-    def test_standard_request_prompt_uses_bridge_slots_for_tools_and_history(self) -> None:
+    def test_standard_request_prompt_preserves_real_tool_names_for_tools_and_history(self) -> None:
         req_data = {
             "model": "gpt-4.1",
             "messages": [

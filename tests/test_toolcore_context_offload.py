@@ -70,6 +70,28 @@ class ToolCoreContextOffloadTests(unittest.TestCase):
         self.assertIn("Message 2 [user]", plan.generated_files[0].text)
         self.assertIn("latest task", plan.generated_files[0].text)
 
+    def test_plan_adds_tools_context_file_when_large_input_has_tools(self) -> None:
+        messages = [{"role": "user", "content": "latest task " * 12}]
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "Skill",
+                    "description": "Run an available slash command skill.",
+                    "parameters": {"type": "object", "properties": {"skill": {"type": "string"}}},
+                },
+            }
+        ]
+
+        plan = self.offloader.plan(messages, tools=tools, client_profile="openclaw_openai")
+
+        self.assertEqual(len(plan.generated_files), 2)
+        tools_file = next(file for file in plan.generated_files if "Available tool descriptions" in file.text)
+        self.assertIn("Tool: bridge-0", tools_file.text)
+        self.assertNotIn("Tool: Skill", tools_file.text)
+        self.assertIn("Run an available slash command skill.", tools_file.text)
+        self.assertIn('"skill"', tools_file.text)
+
 
 if __name__ == "__main__":
     unittest.main()

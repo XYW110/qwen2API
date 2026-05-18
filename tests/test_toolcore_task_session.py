@@ -2,6 +2,8 @@ import unittest
 from types import SimpleNamespace
 
 from backend.adapter.standard_request import StandardRequest
+from backend.toolcore.tool_catalog import ToolCatalog
+from backend.toolcore.types import ToolDefinition
 from backend.toolcore.task_session import (
     SessionHistoryEntry,
     build_continuation_prompt,
@@ -24,6 +26,26 @@ class ToolCoreTaskSessionTests(unittest.TestCase):
         rendered = render_session_message(message, client_profile="openclaw_openai", tools_enabled=True)
 
         self.assertEqual(rendered, "[Tool Result for call call_1]\ndone\n[/Tool Result]")
+
+    def test_render_session_message_maps_assistant_tool_call_to_model_name(self) -> None:
+        message = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"id": "call_1", "type": "function", "function": {"name": "Read", "arguments": '{"file_path": "README.md"}'}}
+            ],
+        }
+        catalog = ToolCatalog([ToolDefinition(name="Read", client_name="Read", model_name="bridge-0")])
+
+        rendered = render_session_message(
+            message,
+            client_profile="openclaw_openai",
+            tools_enabled=True,
+            tool_catalog=catalog,
+        )
+
+        self.assertIn('<|DSML|invoke name="bridge-0">', rendered)
+        self.assertNotIn('<|DSML|invoke name="Read">', rendered)
 
     def test_extract_session_history_entries_is_stable(self) -> None:
         messages = [{"role": "assistant", "content": "hello"}]
