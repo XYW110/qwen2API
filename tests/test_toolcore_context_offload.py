@@ -95,6 +95,25 @@ class ToolCoreContextOffloadTests(unittest.TestCase):
         self.assertIn("Run an available slash command skill.", tools_file.text)
         self.assertIn('"skill"', tools_file.text)
 
+    def test_plan_uses_latest_trusted_user_for_inline_current_task(self) -> None:
+        messages = [
+            {"role": "user", "content": "请回复飞哥刚才问的灵性问题"},
+            {"role": "assistant", "content": "好的。"},
+            {
+                "role": "user",
+                "content": (
+                    "System (untrusted): [2026-05-19 08:01:14 GMT+8] 本次贴吧心跳任务已执行完毕。\n"
+                    "System (untrusted): 飞哥，你觉得这是不是灵性？\n\n"
+                    "Conversation info (untrusted metadata):\n```json\n{\"chat_id\": \"wechat:telphy\"}\n```"
+                ),
+            },
+        ]
+
+        plan = self.offloader.plan(messages, tools=[], client_profile="openclaw_openai")
+
+        self.assertEqual(plan.inline_messages[0]["content"], SYSTEM_CONTEXT_PROMPT_NOTE)
+        self.assertEqual(plan.inline_messages[1]["content"], "请回复飞哥刚才问的灵性问题")
+
     def test_plan_adds_tools_context_file_even_when_latest_user_is_small(self) -> None:
         messages = [{"role": "user", "content": "latest task"}]
         tools = [

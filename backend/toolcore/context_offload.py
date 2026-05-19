@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
 from backend.adapter.standard_request import CLAUDE_CODE_OPENAI_PROFILE
+from backend.services.client_profiles import OPENCLAW_OPENAI_PROFILE, sanitize_openclaw_user_text
 from backend.toolcore.prompt_contract import model_bridge_tool_name, normalize_prompt_tool
 
 SYSTEM_CONTEXT_FILE_PREFIX = "qwen2api_context"
@@ -75,6 +77,34 @@ class ContextOffloader:
             return "\n".join(chunk for chunk in chunks if chunk)
         return str(content)
 
+    def _split_openclaw_user_context(self, text: str) -> tuple[str, str]:
+        cleaned = text.strip()
+        if not cleaned:
+            return "", ""
+        if cleaned.startswith("System (untrusted):"):
+            return "", ""
+        if not cleaned.startswith(("## Memory Recall", "## Compiled Wiki")):
+            return "", sanitize_openclaw_user_text(cleaned).strip()
+        parts = [part.strip() for part in re.split(r"\n\s*\n", cleaned) if part.strip()]
+        context_parts: list[str] = []
+        while parts and parts[0].startswith(("## Memory Recall", "## Compiled Wiki")):
+            context_parts.append(parts.pop(0))
+        task_text = sanitize_openclaw_user_text("\n\n".join(parts)).strip()
+        return "\n\n".join(context_parts).strip(), task_text
+
+    def _latest_user_parts(self, messages: list[dict[str, Any]], *, client_profile: str) -> tuple[str, str]:
+        for message in reversed(messages or []):
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            text = self._extract_text(message).strip()
+            if client_profile == OPENCLAW_OPENAI_PROFILE:
+                context_text, task_text = self._split_openclaw_user_context(text)
+            else:
+                context_text, task_text = "", text
+            if task_text:
+                return context_text, task_text
+        return "", ""
+
     def _make_file(self, base_name: str, ext: str, text: str, content_type: str) -> LocalContextFile:
         data = text.encode("utf-8")
         return LocalContextFile(
@@ -111,9 +141,7 @@ class ContextOffloader:
         if not history_needs_file and not tools_text:
             return ContextOffloadPlan(mode="inline", inline_messages=messages, estimated_prompt_len=estimated)
 
-        user_messages = [message for message in messages if message.get("role") == "user"]
-        latest_user = user_messages[-1] if user_messages else {"role": "user", "content": ""}
-        latest_user_text = self._extract_text(latest_user)
+        latest_user_context, latest_user_text = self._latest_user_parts(messages, client_profile=client_profile)
 
         serialized_parts: list[str] = []
         if history_needs_file:
@@ -152,6 +180,8 @@ class ContextOffloader:
             )
 
         rewritten_messages = [{"role": "user", "content": SYSTEM_CONTEXT_PROMPT_NOTE}]
+        if latest_user_context:
+            rewritten_messages.append({"role": "user", "content": latest_user_context})
         if latest_user_text.strip():
             rewritten_messages.append({"role": "user", "content": latest_user_text.strip()})
 

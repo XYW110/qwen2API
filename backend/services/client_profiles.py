@@ -12,7 +12,7 @@ OPENCLAW_STARTUP_PATTERNS = (
     "A new session was started via /new or /reset.",
     "If runtime-provided startup context is included for this first turn",
 )
-UNTRUSTED_METADATA_PREFIXES = ("Sender (untrusted metadata):", "Conversation info (untrusted metadata):")
+UNTRUSTED_METADATA_PREFIXES = ("Sender (untrusted metadata):", "Conversation info (untrusted metadata):", "System (untrusted):")
 OPENCLAW_UNTRUSTED_METADATA_PREFIX = UNTRUSTED_METADATA_PREFIXES[0]
 USER_ROLE_SYSTEM_PREFIXES = ("## Memory Recall", "## Compiled Wiki", "System:")
 OPENCODE_SYSTEM_PREFIX = "you are opencode"
@@ -201,8 +201,15 @@ def sanitize_openclaw_user_text(text: str) -> str:
     cleaned = text.strip()
     if not cleaned:
         return cleaned
-    if any(cleaned.startswith(prefix) for prefix in USER_ROLE_SYSTEM_PREFIXES):
+    if cleaned.startswith("System:"):
         return ""
+    if cleaned.startswith(("## Memory Recall", "## Compiled Wiki")):
+        parts = [part.strip() for part in re.split(r"\n\s*\n", cleaned) if part.strip()]
+        while parts and parts[0].startswith(("## Memory Recall", "## Compiled Wiki")):
+            parts.pop(0)
+        cleaned = "\n\n".join(parts).strip()
+        if not cleaned:
+            return ""
     if any(marker in cleaned for marker in OPENCLAW_STARTUP_PATTERNS):
         return ""
     if cleaned.startswith(OPENCLAW_UNTRUSTED_METADATA_PREFIX):
