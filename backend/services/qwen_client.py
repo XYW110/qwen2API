@@ -33,6 +33,20 @@ class QwenClient:
             "Content-Type": "application/json",
         }
 
+    @staticmethod
+    def _build_headers_with_cookies(cookies: str) -> dict[str, str]:
+        """使用 cookies 而不是 Bearer token 构建请求头"""
+        return {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Referer": f"{BASE_URL}/",
+            "Origin": BASE_URL,
+            "Connection": "keep-alive",
+            "Content-Type": "application/json",
+            "Cookie": cookies,
+        }
+
     async def _request_json(
         self,
         method: str,
@@ -132,20 +146,32 @@ class QwenClient:
             log.warning(f"[verify_token] HTTP 请求异常: {e}")
             return False
 
-    async def list_models(self, token: str) -> list:
+    async def list_models(self, account= None) -> list:
+        """获取模型列表，优先使用 cookies，如果没有则使用 token"""
         try:
+            # 尝试从 account 获取 cookies
+            cookies = getattr(account, 'cookies', None) if account else None
+            
+            # 优先使用 cookies，如果没有 cookies 则使用 token
+            if cookies:
+                headers = self._build_headers_with_cookies(cookies)
+            elif account and account.token:
+                headers = self._build_headers(account.token)
+            else:
+                return []
+            
             async with httpx.AsyncClient(timeout=10) as hc:
                 resp = await hc.get(
                     f"{BASE_URL}/api/models",
-                    headers=self._build_headers(token),
+                    headers=headers,
                 )
+            
             if resp.status_code != 200:
                 return []
-            try:
-                return resp.json().get("data", [])
-            except Exception as e:
-                log.warning(f"[list_models] JSON 解析失败: {e}, status={resp.status_code}, text={resp.text[:100]}")
-                return []
+            
+            result = resp.json()
+            models = result.get("data", [])
+            return models
         except Exception:
             return []
 

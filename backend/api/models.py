@@ -24,11 +24,21 @@ async def list_models(request: Request):
     app = request.app
     users_db = app.state.users_db
     client: QwenClient = app.state.qwen_client
+    account_pool = app.state.account_pool
 
     auth = await resolve_auth_context(request, users_db)
-    token = auth.token
+    
+    # 直接从 account_pool 获取第一个可用的 account，不依赖 token 匹配
+    account = None
+    if account_pool and account_pool.accounts:
+        # 查找第一个可用且有 token 或 cookies 的 account
+        for acc in account_pool.accounts:
+            if acc.valid and (acc.token or acc.cookies):
+                account = acc
+                break
+    
     try:
-        upstream_models = await client.list_models(token)
+        upstream_models = await client.list_models(account)
     except Exception:
         upstream_models = []
 
