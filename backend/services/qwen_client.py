@@ -70,6 +70,41 @@ class QwenClient:
         chats = data.get("data", [])
         return chats if isinstance(chats, list) else []
 
+    async def disable_update_memory(self, token: str) -> dict:
+        return await self._request_json(
+            "POST",
+            "/api/v2/users/user/settings/update",
+            token,
+            body={"tools_enabled": {"history_retriever": False, "bio": False}},
+            timeout=20.0,
+        )
+
+    async def disable_memory(self, token: str) -> dict:
+        return await self._request_json(
+            "POST",
+            "/api/v2/users/user/settings/update",
+            token,
+            body={"memory": {"enable_memory": False, "enable_history_memory": False}},
+            timeout=20.0,
+        )
+
+    async def clear_memories(self, token: str) -> dict:
+        return await self._request_json(
+            "POST",
+            "/api/v2/memories/delete",
+            token,
+            body={"forget_all": True},
+            timeout=20.0,
+        )
+
+    async def clear_all_chats(self, token: str) -> dict:
+        return await self._request_json(
+            "DELETE",
+            "/api/v2/chats/",
+            token,
+            timeout=20.0,
+        )
+
     async def verify_token(self, token: str) -> bool:
         """Verify token validity via direct HTTP (no browser page needed)."""
         if not token:

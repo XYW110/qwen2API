@@ -182,6 +182,68 @@ async def verify_account(email: str, request: Request):
 
     return {"email": acc.email, "valid": is_valid}
 
+def _qwen_operation_response(email: str, result: dict):
+    status = int(result.get("status", 0) or 0)
+    body = result.get("body", "")
+    return {
+        "ok": 200 <= status < 300,
+        "email": email,
+        "status": status,
+        "body": body,
+    }
+
+
+def _get_account_or_404(pool: AccountPool, email: str) -> Account:
+    acc = pool.get_by_email(email)
+    if not acc:
+        raise HTTPException(status_code=404, detail="Account not found")
+    return acc
+
+
+@router.post("/accounts/{email}/settings/disable-update-memory", dependencies=[Depends(verify_admin)])
+async def disable_account_update_memory(email: str, request: Request):
+    from backend.services.qwen_client import QwenClient
+
+    pool: AccountPool = request.app.state.account_pool
+    client: QwenClient = request.app.state.qwen_client
+    acc = _get_account_or_404(pool, email)
+    result = await client.disable_update_memory(acc.token)
+    return _qwen_operation_response(email, result)
+
+
+@router.post("/accounts/{email}/settings/disable-memory", dependencies=[Depends(verify_admin)])
+async def disable_account_memory(email: str, request: Request):
+    from backend.services.qwen_client import QwenClient
+
+    pool: AccountPool = request.app.state.account_pool
+    client: QwenClient = request.app.state.qwen_client
+    acc = _get_account_or_404(pool, email)
+    result = await client.disable_memory(acc.token)
+    return _qwen_operation_response(email, result)
+
+
+@router.post("/accounts/{email}/memories/clear", dependencies=[Depends(verify_admin)])
+async def clear_account_memories(email: str, request: Request):
+    from backend.services.qwen_client import QwenClient
+
+    pool: AccountPool = request.app.state.account_pool
+    client: QwenClient = request.app.state.qwen_client
+    acc = _get_account_or_404(pool, email)
+    result = await client.clear_memories(acc.token)
+    return _qwen_operation_response(email, result)
+
+
+@router.post("/accounts/{email}/chats/clear", dependencies=[Depends(verify_admin)])
+async def clear_account_chats(email: str, request: Request):
+    from backend.services.qwen_client import QwenClient
+
+    pool: AccountPool = request.app.state.account_pool
+    client: QwenClient = request.app.state.qwen_client
+    acc = _get_account_or_404(pool, email)
+    result = await client.clear_all_chats(acc.token)
+    return _qwen_operation_response(email, result)
+
+
 @router.delete("/accounts/{email}", dependencies=[Depends(verify_admin)])
 async def delete_account(email: str, request: Request):
     from backend.core.account_pool import AccountPool

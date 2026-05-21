@@ -41,3 +41,5 @@ fix_*.py
 
 # local cleanup
 docs/superpowers/
+/.snow
+/temp
