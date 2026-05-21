@@ -98,7 +98,7 @@ def _fallback_context_attachment_result(
     fallback_payload = dict(payload)
     summary_parts: list[str] = []
     if use_generated_context_files and plan.summary_text:
-        summary_parts.append(plan.summary_text[:1200])
+        summary_parts.append(plan.summary_text)
     if manual_attachments:
         names = ", ".join(att.filename for att in manual_attachments[:4])
         summary_parts.append(

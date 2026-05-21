@@ -24,6 +24,13 @@ class ToolCoreRoundtripTests(unittest.TestCase):
         self.assertEqual(messages[0]["role"], "tool")
         self.assertEqual(messages[0]["tool_call_id"], "call_123")
 
+    def test_responses_history_preserves_textual_tool_wrapper_input(self) -> None:
+        content = "##TOOL_CALL##\n{\"name\": \"Read\", \"input\": {\"file_path\": \"README.md\"}}\n##END_CALL##"
+
+        messages = response_input_item_to_messages({"type": "message", "role": "assistant", "content": content})
+
+        self.assertEqual(messages, [{"role": "assistant", "content": content}])
+
     def test_chat_and_responses_expose_equivalent_tool_semantics(self) -> None:
         request = StandardRequest(
             prompt="prompt",

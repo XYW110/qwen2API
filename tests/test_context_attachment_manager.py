@@ -387,6 +387,48 @@ class ContextAttachmentPreparationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Human (CURRENT TASK - TOP PRIORITY): 现在检查当前项目为什么工具不可见", prompt)
         self.assertNotIn(f"Human (CURRENT TASK - TOP PRIORITY): {SYSTEM_CONTEXT_PROMPT_NOTE}", prompt)
 
+    async def test_generated_context_fallback_preserves_full_history_summary(self) -> None:
+        app = SimpleNamespace(state=SimpleNamespace(
+            context_offloader=ContextOffloader(SimpleNamespace(
+                CONTEXT_INLINE_MAX_CHARS=80,
+                CONTEXT_FORCE_FILE_MAX_CHARS=160,
+                CONTEXT_ATTACHMENT_TTL_SECONDS=600,
+            )),
+            account_pool=SimpleNamespace(
+                acquire_wait=AsyncMock(return_value=None),
+                acquire_wait_preferred=AsyncMock(return_value=None),
+                release=lambda _acc: None,
+            ),
+            file_store=SimpleNamespace(save_text=AsyncMock(), delete_path=AsyncMock()),
+            session_affinity=SimpleNamespace(
+                get=AsyncMock(return_value=None),
+                bind_account=AsyncMock(),
+                add_uploaded_file=AsyncMock(),
+            ),
+            upstream_file_cache=SimpleNamespace(get=AsyncMock(return_value=None), set=AsyncMock()),
+            upstream_file_uploader=SimpleNamespace(upload_local_file=AsyncMock()),
+        ))
+        tail_marker = "TAIL_MARKER_DO_NOT_DROP"
+        payload = {
+            "model": "gpt-4.1",
+            "messages": [
+                {"role": "user", "content": "A" * 1500},
+                {"role": "assistant", "content": tail_marker},
+                {"role": "user", "content": "latest task"},
+            ],
+        }
+
+        result = await prepare_context_attachments(
+            app=app,
+            payload=payload,
+            surface="openai",
+            auth_token="tok",
+            client_profile="openclaw_openai",
+        )
+
+        self.assertTrue(result["attachment_fallback"])
+        self.assertIn(tail_marker, result["payload"]["messages"][0]["content"])
+
     async def test_generated_context_ignores_existing_affinity_when_selecting_upload_account(self) -> None:
         async def save_text(filename, text, content_type, purpose):
             return {

@@ -153,7 +153,7 @@ class ContextOffloader:
                     continue
                 serialized_parts.append(f"## Message {idx} [{role}]\n{text.strip()}\n")
         attachment_text = "\n".join(serialized_parts).strip()
-        summary_text = attachment_text[:1200] if attachment_text else ""
+        summary_text = attachment_text if attachment_text else ""
 
         if history_estimated <= self.settings.CONTEXT_FORCE_FILE_MAX_CHARS:
             mode = "hybrid"

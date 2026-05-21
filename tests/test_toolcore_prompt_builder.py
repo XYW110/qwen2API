@@ -34,7 +34,7 @@ class ToolCorePromptBuilderTests(unittest.TestCase):
         self.assertIn("[Attachment file_id=file_1 filename=spec.md]", rendered)
         self.assertIn("[Attachment image file_id=img_1 mime=image/png]", rendered)
 
-    def test_extract_text_user_tool_mode_keeps_latest_text_block(self) -> None:
+    def test_extract_text_user_tool_mode_keeps_all_text_blocks(self) -> None:
         content = [
             {"type": "text", "text": "old instruction"},
             {"type": "text", "text": "latest instruction"},
@@ -42,8 +42,31 @@ class ToolCorePromptBuilderTests(unittest.TestCase):
 
         self.assertEqual(
             _extract_text(content, user_tool_mode=True, client_profile=CLAUDE_CODE_OPENAI_PROFILE),
-            "latest instruction",
+            "old instruction\nlatest instruction",
         )
+
+    def test_messages_to_prompt_preserves_all_heavy_tool_history(self) -> None:
+        messages = []
+        for index in range(1, 31):
+            messages.append({"role": "user", "content": f"user marker {index}"})
+            messages.append({"role": "assistant", "content": f"assistant marker {index}"})
+        req_data = {
+            "messages": messages,
+            "tools": [
+                {
+                    "name": "Read",
+                    "description": "Read file content",
+                    "parameters": {"type": "object", "properties": {"file_path": {"type": "string"}}},
+                }
+            ],
+        }
+
+        result = messages_to_prompt(req_data, client_profile=QWEN_CODE_OPENAI_PROFILE)
+
+        self.assertIn("Human: user marker 1", result.prompt)
+        self.assertIn("Assistant: assistant marker 1", result.prompt)
+        self.assertIn("user marker 30", result.prompt)
+        self.assertIn("Assistant: assistant marker 30", result.prompt)
 
     def test_messages_to_prompt_places_bridge_tool_contract_before_user_history(self) -> None:
         req_data = {
@@ -62,6 +85,26 @@ class ToolCorePromptBuilderTests(unittest.TestCase):
 
         self.assertLess(result.prompt.index("=== MANDATORY TOOL CALL INSTRUCTIONS ==="), result.prompt.index("Human: Who are you?"))
         self.assertLess(result.prompt.index("Always answer as a pirate captain."), result.prompt.index("=== MANDATORY TOOL CALL INSTRUCTIONS ==="))
+
+    def test_messages_to_prompt_preserves_assistant_history_with_review_markers(self) -> None:
+        req_data = {
+            "messages": [
+                {"role": "user", "content": "first task"},
+                {"role": "assistant", "content": "**需求回显**\n我已收到 first task"},
+                {"role": "user", "content": "second task"},
+            ],
+            "tools": [
+                {
+                    "name": "Read",
+                    "description": "Read file content",
+                    "parameters": {"type": "object", "properties": {"file_path": {"type": "string"}}},
+                }
+            ],
+        }
+
+        result = messages_to_prompt(req_data, client_profile=OPENCLAW_OPENAI_PROFILE)
+
+        self.assertIn("Assistant: **需求回显**\n我已收到 first task", result.prompt)
 
     def test_messages_to_prompt_preserves_required_tool_and_current_task(self) -> None:
         req_data = {

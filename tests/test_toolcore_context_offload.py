@@ -73,6 +73,19 @@ class ToolCoreContextOffloadTests(unittest.TestCase):
         self.assertIn("Message 2 [user]", plan.generated_files[0].text)
         self.assertIn("latest task", plan.generated_files[0].text)
 
+    def test_plan_summary_text_keeps_full_history_for_inline_fallback(self) -> None:
+        tail_marker = "TAIL_MARKER_DO_NOT_DROP"
+        messages = [
+            {"role": "user", "content": "A" * 1500},
+            {"role": "assistant", "content": tail_marker},
+            {"role": "user", "content": "latest task"},
+        ]
+
+        plan = self.offloader.plan(messages, tools=[], client_profile="openclaw_openai")
+
+        self.assertIn(tail_marker, plan.summary_text)
+        self.assertEqual(plan.summary_text, plan.generated_files[0].text)
+
     def test_plan_adds_tools_context_file_when_large_input_has_tools(self) -> None:
         messages = [{"role": "user", "content": "latest task " * 12}]
         tools = [

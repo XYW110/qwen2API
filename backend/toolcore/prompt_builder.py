@@ -137,10 +137,7 @@ def _extract_text(content, user_tool_mode: bool = False, client_profile: str = O
             elif part_type == "input_image":
                 other_parts.append(f"[Attachment image file_id={part.get('file_id', '')} mime={part.get('mime_type', '')}]")
 
-        if user_tool_mode and text_blocks:
-            parts.append(text_blocks[-1])
-        else:
-            parts.extend(text_blocks)
+        parts.extend(text_blocks)
         parts.extend(other_parts)
         return "\n".join(part for part in parts if part)
     return ""
@@ -193,12 +190,6 @@ def build_prompt_with_tools(
     required_tool_name: str | None = None,
     tool_catalog=None,
 ) -> str:
-    if tools and client_profile == QWEN_CODE_OPENAI_PROFILE:
-        max_chars = 24000
-    elif tools and client_profile == CLAUDE_CODE_OPENAI_PROFILE:
-        max_chars = 18000
-    else:
-        max_chars = 120000
     sys_part = f"<system>\n{system_prompt}\n</system>" if system_prompt else ""
     tools_part = ""
     if tools:
@@ -223,18 +214,10 @@ def build_prompt_with_tools(
             ]
         )
 
-    overhead = len(sys_part) + len(tools_part) + 50
-    budget = max_chars - overhead
     history_parts = []
     used = 0
-    needs_review_markers = ("需求回显", "已了解规则", "等待用户输入", "待执行任务", "待确认事项", "[需求回显]", "**需求回显**")
     msg_count = 0
-    max_history_msgs = (
-        16 if client_profile == QWEN_CODE_OPENAI_PROFILE else (12 if client_profile == CLAUDE_CODE_OPENAI_PROFILE else 200)
-    ) if tools else 200
     for msg in reversed(messages):
-        if msg_count >= max_history_msgs:
-            break
         role = msg.get("role", "")
         if role not in ("user", "assistant", "system", "developer", "tool"):
             continue
@@ -251,8 +234,6 @@ def build_prompt_with_tools(
             elif not isinstance(tool_content, str):
                 tool_content = str(tool_content)
             line = f"[Tool Result]{(' id=' + tool_call_id) if tool_call_id else ''}\n{tool_content}\n[/Tool Result]"
-            if used + len(line) + 2 > budget and history_parts:
-                break
             history_parts.insert(0, line)
             used += len(line) + 2
             msg_count += 1
@@ -288,10 +269,6 @@ def build_prompt_with_tools(
         if not str(text or "").strip():
             continue
 
-        if tools and role == "assistant" and any(marker in text for marker in needs_review_markers):
-            log.debug(f"[Prompt] 跳过需求回显式 assistant 消息 ({len(text)}字)")
-            msg_count += 1
-            continue
         lower_text = text.lower()
         is_tool_result = role == "user" and (
             "[tool result" in lower_text or text.startswith("{") or '"results"' in text[:100]
@@ -299,8 +276,6 @@ def build_prompt_with_tools(
         is_tool_result_only_user_msg = role == "user" and not user_text_only.strip() and bool(text.strip())
         prefix = "" if is_tool_result_only_user_msg else {"user": "Human: ", "assistant": "Assistant: ", "system": "System: ", "developer": "System: "}.get(role, "")
         line = text if is_tool_result_only_user_msg else f"{prefix}{text}"
-        if used + len(line) + 2 > budget and history_parts:
-            break
         history_parts.insert(0, line)
         used += len(line) + 2
         msg_count += 1
@@ -320,13 +295,9 @@ def build_prompt_with_tools(
             first_line = f"Human: {first_short}"
             if not history_parts or not history_parts[0].startswith(f"Human: {first_text[:60]}"):
                 first_line_cost = len(first_line) + 2
-                if first_line_cost <= budget:
-                    while history_parts and used + first_line_cost > budget:
-                        removed = history_parts.pop()
-                        used -= len(removed) + 2
-                    history_parts.insert(0, first_line)
-                    used += first_line_cost
-                    log.debug(f"[Prompt] Restored original task context ({len(first_short)} chars)")
+                history_parts.insert(0, first_line)
+                used += first_line_cost
+                log.debug(f"[Prompt] Restored original task context ({len(first_short)} chars)")
 
     latest_user_line = ""
     if tools and messages and not _has_tool_continuation_after_latest_user(messages, client_profile):

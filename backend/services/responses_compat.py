@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import copy
 import json
-import logging
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -17,7 +16,6 @@ from backend.toolcore.roundtrip import (
 )
 from backend.toolcore.stream_state_machine import ToolStreamStateMachine
 
-log = logging.getLogger("qwen2api.responses")
 TOOL_ARGUMENT_CHUNK_SIZE = 128
 
 
@@ -105,9 +103,6 @@ def response_input_item_to_messages(item: Any) -> list[dict[str, Any]]:
     if item_type == "message" or "role" in item:
         role = item.get("role", "user")
         content = normalize_response_content(item.get("content", item.get("text", "")))
-        if role == "assistant" and is_textual_tool_wrapper(content):
-            log.info("[Responses] skipping assistant textual tool wrapper echo from input history")
-            return []
         message: dict[str, Any] = {"role": role, "content": content}
         if role == "assistant" and item.get("tool_calls"):
             message["tool_calls"] = item["tool_calls"]
