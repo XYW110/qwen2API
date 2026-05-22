@@ -30,6 +30,8 @@ class AccountPoolDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         busy.inflight = 1
         cooldown = Account(email="cooldown@example.com")
         cooldown.last_request_started = 100.0
+        cooldown.cooldown_started_at = 99.0  # 设置为冷却状态（在 mock time 100.2 时仍处于冷却期内）
+        cooldown.consecutive_failures = 3  # 达到阈值
         rate_limited = Account(email="rate@example.com")
         rate_limited.rate_limited_until = 130.0
         invalid = Account(email="invalid@example.com")

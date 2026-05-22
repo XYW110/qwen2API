@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     REQUEST_JITTER_MAX_MS: int = int(os.getenv("REQUEST_JITTER_MAX_MS", 0))
     RATE_LIMIT_BASE_COOLDOWN: int = int(os.getenv("RATE_LIMIT_BASE_COOLDOWN", 600))
     RATE_LIMIT_MAX_COOLDOWN: int = int(os.getenv("RATE_LIMIT_MAX_COOLDOWN", 3600))
+    # 账号选择策略与冷却机制
+    ACCOUNT_SELECTION_STRATEGY: str = os.getenv("ACCOUNT_SELECTION_STRATEGY", "least_loaded")
+    ACCOUNT_MAX_FAILURES_BEFORE_COOLDOWN: int = int(os.getenv("ACCOUNT_MAX_FAILURES_BEFORE_COOLDOWN", 3))
+    ACCOUNT_COOLDOWN_PERIOD_SECONDS: int = int(os.getenv("ACCOUNT_COOLDOWN_PERIOD_SECONDS", 300))
+
 
     # 日志
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")

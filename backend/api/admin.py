@@ -4,6 +4,74 @@ from backend.core.config import settings
 from backend.core.database import AsyncJsonDB
 from backend.core.account_pool import AccountPool, Account
 import secrets
+import re
+
+# 代理 URL 校验正则
+_PROXY_URL_RE = re.compile(r"^(https?|socks5)://\S+$", re.IGNORECASE)
+
+def _is_valid_proxy_url(url: str | None) -> bool:
+    """空值视为合法（表示无代理），非空必须匹配协议格式"""
+    if not url:
+        return True
+    return bool(_PROXY_URL_RE.match(url.strip()))
+
+def _parse_account_line(line: str) -> dict | None:
+    """
+    解析单行账号文本
+    支持格式: email:password 或 email:password|proxy_url
+    使用 find 而非 split，避免密码中包含 ':' 时截断
+    """
+    if not isinstance(line, str):
+        return None
+    trimmed = line.strip()
+    if not trimmed:
+        return None
+
+    # 先按第一个 '|' 切出可选 proxy
+    pipe_idx = trimmed.find("|")
+    if pipe_idx == -1:
+        credentials = trimmed
+        proxy = None
+    else:
+        credentials = trimmed[:pipe_idx]
+        proxy = trimmed[pipe_idx + 1:].strip() or None
+
+    # credentials 部分按第一个 ':' 切分
+    colon_idx = credentials.find(":")
+    if colon_idx == -1:
+        return None
+
+    email = credentials[:colon_idx].strip()
+    password = credentials[colon_idx + 1:].strip()
+
+    if not email or not password:
+        return None
+
+    return {"email": email, "password": password, "proxy": proxy}
+
+def _parse_batch_accounts_text(text: str) -> dict:
+    """
+    解析批量账号文本
+    Returns: {"lines": [...], "parsed": [...], "invalid_count": int}
+    """
+    normalized = str(text).replace("\r", "\n")
+    lines = [ln.strip() for ln in normalized.split("\n") if ln.strip()]
+
+    parsed = []
+    invalid_count = 0
+
+    for line in lines:
+        result = _parse_account_line(line)
+        if not result:
+            invalid_count += 1
+            continue
+        # proxy 格式校验
+        if result["proxy"] and not _is_valid_proxy_url(result["proxy"]):
+            invalid_count += 1
+            continue
+        parsed.append(result)
+
+    return {"lines": lines, "parsed": parsed, "invalid_count": invalid_count}
 
 router = APIRouter()
 
@@ -83,15 +151,29 @@ async def add_account(request: Request):
         raise HTTPException(400, detail="Invalid JSON body")
 
     token = data.get("token", "")
+    email = data.get("email", "")
+    password = data.get("password", "")
+
+    # 向后兼容: 支持 token 直传 或 email+password 自动登录
+    if not token and not (email and password):
+        raise HTTPException(400, detail="需要提供 token 或 email+password")
+
     if not token:
-        raise HTTPException(400, detail="token is required")
+        # 通过邮箱密码自动登录获取 token
+        resolver = client.auth_resolver
+        proxy = data.get("proxy", "")
+        ok, new_token, error = await resolver.login(email, password, proxy or None)
+        if not ok:
+            return {"ok": False, "error": f"登录失败: {error}"}
+        token = new_token
 
     acc = Account(
-        email=data.get("email", f"manual_{int(time.time())}@qwen"),
-        password=data.get("password", ""),
+        email=email or f"manual_{int(time.time())}@qwen",
+        password=password,
         token=token,
         cookies=data.get("cookies", ""),
-        username=data.get("username", "")
+        username=data.get("username", ""),
+        proxy=data.get("proxy", ""),
     )
 
     is_valid = await client.verify_token(token)
@@ -112,6 +194,104 @@ async def list_accounts(request: Request):
         d.update(diagnostics_by_email.get(a.email, {}))
         accs.append(d)
     return {"accounts": accs}
+
+@router.post("/accounts/batch-import", dependencies=[Depends(verify_admin)])
+async def batch_import_accounts(request: Request):
+    """批量导入账号（支持 email:password 或 email:password|proxy_url 格式）"""
+    import asyncio
+    import time as _time
+    from backend.core.account_pool import Account, AccountPool
+    from backend.services.qwen_client import QwenClient
+
+    pool: AccountPool = request.app.state.account_pool
+    client: QwenClient = request.app.state.qwen_client
+
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(400, detail="Invalid JSON body")
+
+    accounts_text = data.get("accounts_text", "")
+    concurrency = min(20, max(1, int(data.get("concurrency", 5))))
+
+    if not accounts_text:
+        raise HTTPException(400, detail="accounts_text 不能为空")
+
+    # 解析文本
+    parse_result = _parse_batch_accounts_text(accounts_text)
+    parsed_accounts = parse_result["parsed"]
+    invalid_count = parse_result["invalid_count"]
+
+    if not parsed_accounts:
+        return {
+            "ok": True,
+            "total": len(parse_result["lines"]),
+            "success": 0,
+            "failed": 0,
+            "skipped": 0,
+            "invalid": invalid_count,
+            "results": [],
+        }
+
+    # 跳过已存在的账号
+    existing_emails = {a.email for a in pool.accounts}
+    new_accounts = []
+    skipped = 0
+    for pa in parsed_accounts:
+        if pa["email"] in existing_emails:
+            skipped += 1
+            continue
+        new_accounts.append(pa)
+
+    # 并发登录 + 导入
+    results = []
+    success_count = 0
+    failed_count = 0
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def _import_one(account_info):
+        nonlocal success_count, failed_count
+        email = account_info["email"]
+        password = account_info["password"]
+        proxy = account_info.get("proxy") or ""
+
+        async with semaphore:
+            ok, token, error = await client.auth_resolver.login(email, password, proxy or None)
+            if not ok:
+                failed_count += 1
+                results.append({"email": email, "ok": False, "error": f"登录失败: {error}"})
+                return
+
+            # 验证 token
+            is_valid = await client.verify_token(token)
+            if not is_valid:
+                failed_count += 1
+                results.append({"email": email, "ok": False, "error": "Token 验证失败"})
+                return
+
+            # 添加到账号池
+            acc = Account(
+                email=email,
+                password=password,
+                token=token,
+                proxy=proxy,
+            )
+            await pool.add(acc)
+            success_count += 1
+            results.append({"email": email, "ok": True})
+
+    # 执行所有导入任务
+    await asyncio.gather(*[_import_one(a) for a in new_accounts])
+
+    return {
+        "ok": True,
+        "total": len(parse_result["lines"]),
+        "success": success_count,
+        "failed": failed_count,
+        "skipped": skipped,
+        "invalid": invalid_count,
+        "results": results,
+    }
 
 @router.post("/accounts/register", dependencies=[Depends(verify_admin)])
 async def register_new_account(request: Request):
@@ -251,6 +431,41 @@ async def delete_account(email: str, request: Request):
     await pool.remove(email)
     return {"ok": True}
 
+
+@router.get("/accounts/export", dependencies=[Depends(verify_admin)])
+async def export_accounts(request: Request):
+    """导出所有账号信息（邮箱:密码|代理 格式）"""
+    from backend.core.account_pool import AccountPool
+    
+    pool: AccountPool = request.app.state.account_pool
+    
+    # 构建导出文本
+    lines = []
+    for acc in pool.accounts:
+        # 只导出有邮箱的账号
+        if not acc.email or acc.email.startswith("manual_"):
+            continue
+            
+        line_parts = [acc.email]
+        if acc.password:
+            line_parts.append(acc.password)
+            
+        # 添加代理（如果存在）
+        if acc.proxy:
+            line = f"{'|'.join(line_parts)}|{acc.proxy}"
+        else:
+            line = ':'.join(line_parts) if len(line_parts) > 1 else line_parts[0]
+            
+        lines.append(line)
+    
+    return {
+        "ok": True, 
+        "accounts_text": "\n".join(lines),
+        "count": len(lines)
+    }
+
+
+
 @router.get("/settings", dependencies=[Depends(verify_admin)])
 async def get_settings():
     from backend.core.config import MODEL_MAP
@@ -262,7 +477,10 @@ async def get_settings():
     return {
         "version": "2.0.0",
         "max_inflight_per_account": backend_settings.MAX_INFLIGHT_PER_ACCOUNT,
-        "model_aliases": safe_map
+        "model_aliases": safe_map,
+        "account_selection_strategy": backend_settings.ACCOUNT_SELECTION_STRATEGY,
+        "account_max_failures_before_cooldown": backend_settings.ACCOUNT_MAX_FAILURES_BEFORE_COOLDOWN,
+        "account_cooldown_period_seconds": backend_settings.ACCOUNT_COOLDOWN_PERIOD_SECONDS
     }
 
 @router.put("/settings", dependencies=[Depends(verify_admin)])
@@ -273,6 +491,12 @@ async def update_settings(data: dict):
     if "model_aliases" in data:
         MODEL_MAP.clear()
         MODEL_MAP.update(data["model_aliases"])
+    if "account_selection_strategy" in data:
+        settings.ACCOUNT_SELECTION_STRATEGY = data["account_selection_strategy"]
+    if "account_max_failures_before_cooldown" in data:
+        settings.ACCOUNT_MAX_FAILURES_BEFORE_COOLDOWN = data["account_max_failures_before_cooldown"]
+    if "account_cooldown_period_seconds" in data:
+        settings.ACCOUNT_COOLDOWN_PERIOD_SECONDS = data["account_cooldown_period_seconds"]
     return {"ok": True}
 
 @router.get("/keys", dependencies=[Depends(verify_admin)])

@@ -10,7 +10,7 @@ log = logging.getLogger(__name__)
 BASE_URL = "https://chat.qwen.ai"
 _AUTH_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
     "Content-Type": "application/json",
@@ -52,6 +52,62 @@ class AuthResolver:
     @staticmethod
     def _sha256_password(password: str) -> str:
         return hashlib.sha256((password or "").encode("utf-8")).hexdigest()
+
+    async def login(self, email: str, password: str, proxy: str | None = None) -> tuple[bool, str | None, str | None]:
+        """通过邮箱密码登录获取 token（用于添加新账号场景）
+
+        Returns:
+            (success, token_or_none, error_detail_or_none)
+        """
+        sha256_pwd = self._sha256_password(password)
+        payload = {
+            "email": email,
+            "password": sha256_pwd,
+        }
+
+        session_kwargs = {
+            "impersonate": "chrome",
+            "timeout": 15,
+            "allow_redirects": True,
+        }
+        if proxy:
+            session_kwargs["proxies"] = {"https": proxy, "http": proxy}
+
+        try:
+            async with AsyncSession(**session_kwargs) as session:
+                resp = await session.post(
+                    f"{BASE_URL}/api/v1/auths/signin",
+                    json=payload,
+                    headers=_AUTH_HEADERS,
+                )
+        except Exception as e:
+            log.warning(f"[Login] {email} 网络异常: {e}")
+            return (False, None, f"网络异常: {e}")
+
+        if resp.status_code != 200:
+            detail = f"HTTP {resp.status_code}"
+            try:
+                err_body = resp.json()
+                # 尝试提取服务端返回的错误信息
+                detail = f"HTTP {resp.status_code}: {err_body.get('detail', err_body.get('message', ''))}"
+            except Exception:
+                pass
+            log.warning(f"[Login] {email} 登录失败: {detail}")
+            return (False, None, detail)
+
+        try:
+            data = resp.json()
+        except Exception:
+            log.warning(f"[Login] {email} 登录响应不是有效 JSON")
+            return (False, None, "登录响应不是有效 JSON")
+
+        new_token = str(data.get("token", "") or "").strip()
+        if not new_token:
+            log.warning(f"[Login] {email} 登录响应缺少 token 字段")
+            return (False, None, "登录响应缺少 token 字段")
+
+        log.info(f"[Login] {email} 登录成功")
+        return (True, new_token, None)
 
     async def auto_heal_account(self, acc: Account):
         """Background task to refresh token. If successful, marks account valid.
@@ -98,8 +154,16 @@ class AuthResolver:
             "password": self._sha256_password(acc.password),
         }
 
+        session_kwargs = {
+            "impersonate": "chrome",
+            "timeout": 15,
+            "allow_redirects": True,
+        }
+        if getattr(acc, "proxy", None):
+            session_kwargs["proxies"] = {"https": acc.proxy, "http": acc.proxy}
+
         try:
-            async with AsyncSession(impersonate="chrome", timeout=15, allow_redirects=True) as session:
+            async with AsyncSession(**session_kwargs) as session:
                 resp = await session.post(
                     f"{BASE_URL}/api/v1/auths/signin",
                     json=payload,

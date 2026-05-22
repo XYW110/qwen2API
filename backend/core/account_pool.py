@@ -22,6 +22,7 @@ class Account:
         password="",
         token="",
         cookies="",
+        proxy="",
         username="",
         activation_pending=False,
         status_code="",
@@ -32,6 +33,8 @@ class Account:
         self.password = password
         self.token = token
         self.cookies = cookies
+        # 兼容旧数据: kwargs 中可能有 proxy，优先使用显式参数
+        self.proxy = kwargs.pop("proxy", proxy) or proxy
         self.username = username
         self.activation_pending = activation_pending
         self.valid = not activation_pending
@@ -45,12 +48,25 @@ class Account:
         self.last_request_finished = float(kwargs.get("last_request_finished", 0.0) or 0.0)
         self.consecutive_failures = int(kwargs.get("consecutive_failures", 0) or 0)
         self.rate_limit_strikes = int(kwargs.get("rate_limit_strikes", 0) or 0)
+        self.cooldown_started_at = float(kwargs.pop("cooldown_started_at", 0.0) or 0.0)
 
     def is_rate_limited(self) -> bool:
         return self.rate_limited_until > time.time()
 
     def is_available(self) -> bool:
-        return self.valid and not self.is_rate_limited()
+        if not self.valid:
+            return False
+        if self.is_rate_limited():
+            return False
+        # 冷却机制: consecutive_failures 达阈值后进入冷却期
+        if self.cooldown_started_at > 0:
+            cooldown_period = getattr(settings, "ACCOUNT_COOLDOWN_PERIOD_SECONDS", 300)
+            if time.time() - self.cooldown_started_at < cooldown_period:
+                return False
+            # 冷却期结束，自动恢复
+            self.cooldown_started_at = 0.0
+            self.consecutive_failures = 0
+        return True
 
     def next_available_at(self) -> float:
         min_interval = max(0, settings.ACCOUNT_MIN_INTERVAL_MS) / 1000.0
@@ -87,6 +103,7 @@ class Account:
             "password": self.password,
             "token": self.token,
             "cookies": self.cookies,
+            "proxy": self.proxy,
             "username": self.username,
             "activation_pending": self.activation_pending,
             "status_code": self.status_code,
@@ -108,6 +125,7 @@ class AccountPool:
         self._sticky_email: Optional[str] = None
         self.last_acquire_diagnostics: dict = {}
         self.last_acquire_wait_diagnostics: dict = {}
+        self._round_robin_index: int = 0
 
     async def load(self):
         data = await self.db.load()
@@ -121,12 +139,12 @@ class AccountPool:
         async with self._lock:
             self.accounts = [a for a in self.accounts if a.email != account.email]
             self.accounts.append(account)
-        await self.save()
+            await self.save()
 
     async def remove(self, email: str):
         async with self._lock:
             self.accounts = [a for a in self.accounts if a.email != email]
-        await self.save()
+            await self.save()
 
     def set_max_inflight(self, value: int):
         self.max_inflight = max(1, int(value))
@@ -161,6 +179,16 @@ class AccountPool:
         is_excluded = bool(exclude and acc.email in exclude)
         is_rate_limited = acc.rate_limited_until > now
         capacity_available = acc.inflight < self.max_inflight
+        # 冷却机制检查
+        is_in_cooldown = False
+        if acc.cooldown_started_at > 0:
+            cooldown_period = getattr(settings, "ACCOUNT_COOLDOWN_PERIOD_SECONDS", 300)
+            if time.time() - acc.cooldown_started_at < cooldown_period:
+                is_in_cooldown = True
+            else:
+                # 冷却期结束，自动恢复
+                acc.cooldown_started_at = 0.0
+                acc.consecutive_failures = 0
 
         if is_excluded:
             reason = "excluded"
@@ -170,10 +198,12 @@ class AccountPool:
             reason = acc.status_code if acc.status_code and acc.status_code != "valid" else "invalid"
         elif is_rate_limited:
             reason = "rate_limited"
+        elif is_in_cooldown:
+            reason = "cooldown"
         elif not capacity_available:
             reason = "busy"
         elif next_available_at > now:
-            reason = "cooldown"
+            reason = "min_interval"
         else:
             reason = "ready"
 
@@ -188,7 +218,10 @@ class AccountPool:
             "max_inflight": self.max_inflight,
             "capacity_available": capacity_available,
             "is_rate_limited": is_rate_limited,
+            "is_in_cooldown": is_in_cooldown,
             "rate_limited_until": acc.rate_limited_until,
+            "cooldown_started_at": acc.cooldown_started_at,
+            "cooldown_ends_at": acc.cooldown_started_at + getattr(settings, "ACCOUNT_COOLDOWN_PERIOD_SECONDS", 300) if acc.cooldown_started_at > 0 else None,
             "next_available_at": next_available_at,
             "next_available_in": next_available_in,
             "last_used": acc.last_used,
@@ -313,7 +346,7 @@ class AccountPool:
                     self._waiters.remove(evt)
 
     async def acquire(self, exclude: set = None) -> Optional[Account]:
-        strategy = "least_loaded"
+        strategy = getattr(settings, "ACCOUNT_SELECTION_STRATEGY", "least_loaded")
         async with self._lock:
             now = time.time()
             self._reclaim_stale_inflight(now)
@@ -330,13 +363,34 @@ class AccountPool:
                 )
                 return None
 
-            ready.sort(key=lambda a: (
-                a.inflight,
-                a.last_request_started or 0.0,
-                a.last_used or 0.0,
-                a.email or "",
-            ))
-            best = ready[0]
+            if strategy == "least_loaded":
+                # 按负载排序，选最少负载的
+                ready.sort(key=lambda a: (
+                    a.inflight,
+                    a.last_request_started or 0.0,
+                    a.last_used or 0.0,
+                    a.email or "",
+                ))
+                best = ready[0]
+            elif strategy == "least_used":
+                # 最久未使用优先 — 均匀分配请求到所有账户
+                ready.sort(key=lambda a: (a.last_used or 0.0, a.email or ""))
+                best = ready[0]
+            elif strategy == "round_robin":
+                # 简单轮询 — 按顺序分配
+                self._round_robin_index = self._round_robin_index % len(ready)
+                best = ready[self._round_robin_index]
+                self._round_robin_index += 1
+            else:
+                # 未知策略，fallback 到 least_loaded
+                ready.sort(key=lambda a: (
+                    a.inflight,
+                    a.last_request_started or 0.0,
+                    a.last_used or 0.0,
+                    a.email or "",
+                ))
+                best = ready[0]
+
             best.inflight += 1
             best.last_used = now
             best.last_request_started = now + _jitter_seconds()
@@ -425,6 +479,11 @@ class AccountPool:
         if self._sticky_email == acc.email:
             self._sticky_email = None
         log.warning(f"[账号] {acc.email} 已标记为不可用，状态={acc.status_code}")
+        # 冷却机制: consecutive_failures 达阈值后进入冷却期
+        max_failures = getattr(settings, "ACCOUNT_MAX_FAILURES_BEFORE_COOLDOWN", 3)
+        if acc.consecutive_failures >= max_failures and acc.cooldown_started_at == 0:
+            acc.cooldown_started_at = time.time()
+            log.warning(f"[账号] {acc.email} 失败次数达上限({max_failures})，进入冷却期")
 
     def mark_success(self, acc: Account):
         acc.consecutive_failures = 0
@@ -468,6 +527,7 @@ class AccountPool:
             "max_inflight": self.max_inflight,
             "waiting": len(self._waiters),
             "account_min_interval_ms": snapshot["account_min_interval_ms"],
+            "selection_strategy": getattr(settings, "ACCOUNT_SELECTION_STRATEGY", "least_loaded"),
             "next_ready_at": snapshot["next_ready_at"],
             "next_ready_in": snapshot["next_ready_in"],
             "last_acquire_diagnostics": self.last_acquire_diagnostics,
