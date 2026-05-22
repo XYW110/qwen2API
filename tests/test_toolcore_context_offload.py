@@ -166,6 +166,40 @@ class ToolCoreContextOffloadTests(unittest.TestCase):
         self.assertIn("Tool: bridge-0", tools_file.text)
         self.assertIn('"skill"', tools_file.text)
 
+    def test_plan_preserves_recent_tool_continuation_inline_when_tools_are_offloaded(self) -> None:
+        messages = [
+            {"role": "user", "content": "画一个美女"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_image",
+                        "type": "function",
+                        "function": {"name": "image_generate", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_image", "content": "MEDIA:0"},
+        ]
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "image_generate",
+                    "description": "Generate an image.",
+                    "parameters": {"type": "object", "properties": {"prompt": {"type": "string"}}},
+                },
+            }
+        ]
+
+        plan = self.offloader.plan(messages, tools=tools, client_profile="openclaw_openai")
+
+        self.assertEqual(plan.inline_messages[0]["content"], SYSTEM_CONTEXT_PROMPT_NOTE)
+        self.assertIn({"role": "user", "content": "画一个美女"}, plan.inline_messages)
+        self.assertIn(messages[1], plan.inline_messages)
+        self.assertIn(messages[2], plan.inline_messages)
+
 
 if __name__ == "__main__":
     unittest.main()
