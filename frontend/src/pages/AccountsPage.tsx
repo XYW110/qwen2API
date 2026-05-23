@@ -776,6 +776,10 @@ export default function AccountsPage() {
         isOpen={isBatchExportOpen}
         onClose={() => setIsBatchExportOpen(false)}
       />
+      <StrategyConfigModal
+        isOpen={isStrategyConfigOpen}
+        onClose={() => setIsStrategyConfigOpen(false)}
+      />
     </div>
   );
 }

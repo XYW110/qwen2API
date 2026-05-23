@@ -13,12 +13,12 @@ interface StrategyConfigData {
   maxFailuresBeforeCooldown: number;
   cooldownPeriodSeconds: number;
 }
-
 interface Props {
+  isOpen: boolean;
   onClose: () => void;
 }
 
-export function StrategyConfigModal({ onClose }: Props) {
+export function StrategyConfigModal({ isOpen, onClose }: Props) {
   const [config, setConfig] = useState<StrategyConfigData>({
     strategy: "least_loaded",
     maxFailuresBeforeCooldown: 3,
@@ -26,7 +26,7 @@ export function StrategyConfigModal({ onClose }: Props) {
   });
   const [loading, setLoading] = useState(false);
 
-  // 从后端获取当前配置
+  // 从后端获取当前配置（必须在 hooks 规则下定义）
   const loadConfig = async () => {
     try {
       setLoading(true);
@@ -55,10 +55,12 @@ export function StrategyConfigModal({ onClose }: Props) {
     }
   };
 
-  // 组件加载时获取配置
+  // 组件加载时获取配置（只在模态框打开时加载）
   useEffect(() => {
-    loadConfig();
-  }, []);
+    if (isOpen) {
+      loadConfig();
+    }
+  }, [isOpen]);
 
   // 保存配置到后端
   const handleSave = async () => {
@@ -96,6 +98,9 @@ export function StrategyConfigModal({ onClose }: Props) {
   const refreshConfig = () => {
     loadConfig();
   };
+
+  // 如果模态框未打开，则不渲染任何内容（必须在所有 hooks 之后）
+  if (!isOpen) return null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
