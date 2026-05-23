@@ -57,7 +57,7 @@ class OpenAIStreamTranslatorTests(unittest.TestCase):
         self.assertEqual(tool_call_chunks[0]["function"]["name"], "exec")
         self.assertNotEqual(tool_call_chunks[0]["function"]["name"], "bridge-0")
 
-    def test_finalize_can_emit_token_usage_chunk(self) -> None:
+    def test_finalize_emits_usage_as_separate_empty_choices_chunk(self) -> None:
         translator = OpenAIStreamTranslator(
             completion_id="chatcmpl_usage",
             created=1,
@@ -70,12 +70,14 @@ class OpenAIStreamTranslatorTests(unittest.TestCase):
         chunks = translator.finalize("stop", usage=usage)
 
         payloads = [json.loads(chunk[6:].strip()) for chunk in chunks if chunk.startswith("data: ") and chunk.strip() != "data: [DONE]"]
-        finish_payload = payloads[-1]
+        finish_payload = payloads[-2]
+        usage_payload = payloads[-1]
         self.assertEqual(finish_payload["choices"][0]["finish_reason"], "stop")
-        self.assertEqual(finish_payload["usage"], usage)
-        self.assertFalse(any(payload.get("choices") == [] for payload in payloads))
+        self.assertNotIn("usage", finish_payload)
+        self.assertEqual(usage_payload["choices"], [])
+        self.assertEqual(usage_payload["usage"], usage)
 
-    def test_finalize_tool_calls_uses_call_id_full_arguments_and_finish_usage(self) -> None:
+    def test_finalize_tool_calls_uses_call_id_full_arguments_and_separate_usage_chunk(self) -> None:
         directive = type(
             "Directive",
             (),
@@ -106,15 +108,17 @@ class OpenAIStreamTranslatorTests(unittest.TestCase):
 
         payloads = [json.loads(chunk[6:].strip()) for chunk in chunks if chunk.startswith("data: ") and chunk.strip() != "data: [DONE]"]
         tool_call_chunks = [payload["choices"][0]["delta"]["tool_calls"][0] for payload in payloads if payload["choices"] and payload["choices"][0]["delta"].get("tool_calls")]
-        finish_payload = payloads[-1]
+        finish_payload = payloads[-2]
+        usage_payload = payloads[-1]
 
         self.assertEqual(len(tool_call_chunks), 1)
         self.assertRegex(tool_call_chunks[0]["id"], r"^call_[0-9a-f]+$")
         self.assertEqual(tool_call_chunks[0]["function"]["name"], "image_generate")
         self.assertEqual(tool_call_chunks[0]["function"]["arguments"], json.dumps({"prompt": "x" * 300}, ensure_ascii=False))
         self.assertEqual(finish_payload["choices"][0]["finish_reason"], "tool_calls")
-        self.assertEqual(finish_payload["usage"], usage)
-        self.assertFalse(any(payload.get("choices") == [] for payload in payloads))
+        self.assertNotIn("usage", finish_payload)
+        self.assertEqual(usage_payload["choices"], [])
+        self.assertEqual(usage_payload["usage"], usage)
 
     def test_stream_tool_call_discards_preceding_content_chunks(self) -> None:
         translator = OpenAIStreamTranslator(

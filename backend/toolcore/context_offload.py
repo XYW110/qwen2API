@@ -106,6 +106,29 @@ class ContextOffloader:
                 return context_text, task_text
         return "", ""
 
+    def _is_tool_result_message(self, message: dict[str, Any]) -> bool:
+        if message.get("role") in {"tool", "function"}:
+            return True
+        content = message.get("content")
+        return isinstance(content, list) and any(
+            isinstance(part, dict) and part.get("type") == "tool_result"
+            for part in content
+        )
+
+    def _recent_tool_continuation_tail(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        items = [message for message in messages or [] if isinstance(message, dict)]
+        for index in range(len(items) - 1, -1, -1):
+            message = items[index]
+            if message.get("role") != "assistant" or not isinstance(message.get("tool_calls"), list) or not message.get("tool_calls"):
+                continue
+            tail = items[index:]
+            if any(item.get("role") == "user" for item in tail[1:]):
+                return []
+            if any(self._is_tool_result_message(item) for item in tail[1:]):
+                return tail
+            return []
+        return []
+
     def _make_file(self, base_name: str, ext: str, text: str, content_type: str) -> LocalContextFile:
         data = text.encode("utf-8")
         return LocalContextFile(
@@ -143,6 +166,7 @@ class ContextOffloader:
             return ContextOffloadPlan(mode="inline", inline_messages=messages, estimated_prompt_len=estimated)
 
         latest_user_context, latest_user_text = self._latest_user_parts(messages, client_profile=client_profile)
+        tool_continuation_tail = self._recent_tool_continuation_tail(messages)
 
         serialized_parts: list[str] = []
         if history_needs_file:
@@ -185,6 +209,7 @@ class ContextOffloader:
             rewritten_messages.append({"role": "user", "content": latest_user_context})
         if latest_user_text.strip():
             rewritten_messages.append({"role": "user", "content": latest_user_text.strip()})
+        rewritten_messages.extend(dict(message) for message in tool_continuation_tail)
 
         return ContextOffloadPlan(
             mode=mode,
