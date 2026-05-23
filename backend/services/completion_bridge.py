@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 from dataclasses import dataclass
+import logging
 import time
 from typing import Any, Awaitable, Callable
 
@@ -25,6 +26,8 @@ from backend.toolcall.runtime_tools import (
     parse_tool_call_arguments,
     tool_target_preview,
 )
+
+log = logging.getLogger("qwen2api.completion_bridge")
 
 
 @dataclass(slots=True)
@@ -165,6 +168,34 @@ async def _reacquire_bound_account_if_needed(*, client, standard_request: Standa
         standard_request.bound_account = None
 
 
+def _fire_and_forget_stats(client, execution, usage, model_name: str) -> None:
+    """Async stats writing via stats_store; never blocks or raises."""
+    try:
+        stats_store = getattr(client.account_pool, 'stats_store', None)
+        if not stats_store or not execution.acc:
+            return
+        email = execution.acc.email
+        start_time = getattr(execution.acc, '_tok_s_start_time', 0)
+        if start_time > 0:
+            elapsed_seconds = time.time() - start_time
+            completion_tokens = usage.get("completion_tokens", 0)
+            if elapsed_seconds > 0 and completion_tokens > 0:
+                asyncio.create_task(stats_store.update_tok_s(
+                    email=email,
+                    model=model_name,
+                    tokens=completion_tokens,
+                    elapsed_seconds=elapsed_seconds,
+                ))
+        asyncio.create_task(stats_store.record_usage(
+            email=email,
+            model=model_name,
+            prompt_tokens=usage.get("prompt_tokens", 0),
+            completion_tokens=usage.get("completion_tokens", 0),
+        ))
+    except Exception as e:
+        log.warning("Failed to fire stats update: %s", e)
+
+
 async def run_completion_bridge(
     *,
     client,
@@ -193,11 +224,9 @@ async def run_completion_bridge(
             extra_prompt_tokens=getattr(standard_request, "context_attachment_tokens", 0),
         )
         await add_used_tokens(users_db, token, usage_delta if usage_delta is not None else usage["total_tokens"])
-        # Update tok/s using real wall-clock times (not jittered, not dependent on release())
-        if execution.acc and getattr(execution.acc, '_tok_s_start_time', 0) > 0:
-            elapsed_seconds = time.time() - execution.acc._tok_s_start_time
-            if elapsed_seconds > 0 and usage["completion_tokens"] > 0:
-                execution.acc.update_tok_s(usage["completion_tokens"], elapsed_seconds)
+        # Async stats write (non-blocking)
+        model_name = getattr(standard_request, 'resolved_model', None) or getattr(standard_request, 'response_model', 'unknown')
+        _fire_and_forget_stats(client, execution, usage, model_name)
         await cleanup_runtime_resources(
             client,
             execution.acc,
@@ -290,11 +319,9 @@ async def run_retryable_completion_bridge(
             )
             usage_delta = usage_delta_factory(execution, current_prompt) if usage_delta_factory is not None else usage["total_tokens"]
             await add_used_tokens(users_db, token, usage_delta)
-            # Update tok/s using real wall-clock times (not jittered, not dependent on release())
-            if execution.acc and getattr(execution.acc, '_tok_s_start_time', 0) > 0:
-                elapsed_seconds = time.time() - execution.acc._tok_s_start_time
-                if elapsed_seconds > 0 and usage["completion_tokens"] > 0:
-                    execution.acc.update_tok_s(usage["completion_tokens"], elapsed_seconds)
+            # Async stats write (non-blocking)
+            model_name = getattr(standard_request, 'resolved_model', None) or getattr(standard_request, 'response_model', 'unknown')
+            _fire_and_forget_stats(client, execution, usage, model_name)
             await cleanup_runtime_resources(
                 client,
                 execution.acc,

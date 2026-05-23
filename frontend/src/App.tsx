@@ -3,6 +3,7 @@ import { Toaster } from "sonner"
 import AdminLayout from "./layouts/AdminLayout"
 import Dashboard from "./pages/Dashboard"
 import AccountsPage from "./pages/AccountsPage"
+import AccountDetailPage from "./pages/AccountDetailPage"
 import TestPage from "./pages/TestPage"
 import TokensPage from "./pages/TokensPage"
 import SettingsPage from "./pages/SettingsPage"
@@ -17,6 +18,7 @@ function App() {
           <Route path="/" element={<AdminLayout />}>
             <Route index element={<Dashboard />} />
             <Route path="accounts" element={<AccountsPage />} />
+            <Route path="accounts/:email" element={<AccountDetailPage />} />
             <Route path="tokens" element={<TokensPage />} />
             <Route path="test" element={<TestPage />} />
             <Route path="images" element={<ImagePage />} />

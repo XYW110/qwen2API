@@ -219,12 +219,46 @@ async def add_account(request: Request):
 async def list_accounts(request: Request):
     pool: AccountPool = request.app.state.account_pool
     diagnostics_by_email = {item["email"]: item for item in pool.account_diagnostics()}
+    
     accs = []
     for a in pool.accounts:
         d = a.to_dict()
         d.update(diagnostics_by_email.get(a.email, {}))
         accs.append(d)
     return {"accounts": accs}
+
+
+@router.get("/accounts/{email}/stats", dependencies=[Depends(verify_admin)])
+async def get_account_stats(email: str, request: Request):
+    """获取账户的详细统计信息"""
+    from urllib.parse import unquote
+    from backend.core.account_stats import AccountStatsStore
+    from backend.core.account_pool import AccountPool
+    
+    # URL decode 邮箱
+    decoded_email = unquote(email)
+    
+    # 检查账户是否存在
+    pool: AccountPool = request.app.state.account_pool
+    if not pool.get_by_email(decoded_email):
+        raise HTTPException(status_code=404, detail="Account not found")
+    
+    # 获取统计信息
+    stats_store: AccountStatsStore | None = getattr(request.app.state, "stats_store", None)
+    if stats_store:
+        try:
+            stats = stats_store.get_by_email(decoded_email)
+            if stats:
+                return stats.model_dump()
+        except Exception:
+            pass  # 读取失败不影响返回
+    
+    # 返回空结构
+    return {
+        "email": decoded_email,
+        "model_stats": {},
+        "hourly_usage": []
+    }
 
 @router.post("/accounts/batch-import", dependencies=[Depends(verify_admin)])
 async def batch_import_accounts(request: Request):

@@ -4,6 +4,7 @@ import logging
 import signal
 import sys
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -16,6 +17,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from backend.core.config import settings
 from backend.core.database import AsyncJsonDB
 from backend.core.account_pool import AccountPool
+from backend.core.account_stats import AccountStatsStore
 from backend.core.session_affinity import SessionAffinityStore
 from backend.core.upstream_file_cache import UpstreamFileCache
 from backend.core.session_lock import SessionLockRegistry
@@ -53,8 +55,17 @@ async def lifespan(app: FastAPI):
         app.state.context_cache_db = AsyncJsonDB(settings.CONTEXT_CACHE_FILE, default_data=[])
         app.state.uploaded_files_db = AsyncJsonDB(settings.UPLOADED_FILES_FILE, default_data=[])
 
+        # 初始化独立统计存储
+        stats_store = AccountStatsStore("data/account_stats.json")
+        await stats_store.load()
+        app.state.stats_store = stats_store
+
         # 初始化组件
-        app.state.account_pool = AccountPool(app.state.accounts_db, max_inflight=settings.MAX_INFLIGHT_PER_ACCOUNT)
+        app.state.account_pool = AccountPool(
+            app.state.accounts_db,
+            max_inflight=settings.MAX_INFLIGHT_PER_ACCOUNT,
+            stats_store=stats_store,
+        )
         app.state.qwen_client = QwenClient(app.state.account_pool)
         app.state.qwen_executor = app.state.qwen_client.executor
         app.state.file_store = LocalFileStore(settings.CONTEXT_GENERATED_DIR, app.state.uploaded_files_db)

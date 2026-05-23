@@ -3,6 +3,7 @@ import logging
 import random
 import time
 from typing import Optional
+
 from backend.core.database import AsyncJsonDB
 from backend.core.config import settings
 
@@ -123,6 +124,7 @@ class Account:
         self.tok_s_updated_at = time.time()
 
     def to_dict(self):
+        # Phase 2: 仅序列化凭证与基础配置字段，统计/运行时状态不再持久化
         return {
             "email": self.email,
             "password": self.password,
@@ -133,17 +135,11 @@ class Account:
             "activation_pending": self.activation_pending,
             "status_code": self.status_code,
             "last_error": self.last_error,
-            "last_request_started": self.last_request_started,
-            "last_request_finished": self.last_request_finished,
-            "consecutive_failures": self.consecutive_failures,
-            "rate_limit_strikes": self.rate_limit_strikes,
-            "tok_s": self.tok_s,
-            "tok_s_updated_at": self.tok_s_updated_at,
         }
 
 
 class AccountPool:
-    def __init__(self, db: AsyncJsonDB, max_inflight: int = settings.MAX_INFLIGHT_PER_ACCOUNT):
+    def __init__(self, db: AsyncJsonDB, max_inflight: int = settings.MAX_INFLIGHT_PER_ACCOUNT, stats_store=None):
         self.db = db
         self.max_inflight = max_inflight
         self.accounts: list[Account] = []
@@ -153,11 +149,19 @@ class AccountPool:
         self.last_acquire_diagnostics: dict = {}
         self.last_acquire_wait_diagnostics: dict = {}
         self._round_robin_index: int = 0
+        self.stats_store = stats_store
 
     async def load(self):
         data = await self.db.load()
         self.accounts = [Account(**d) for d in data] if isinstance(data, list) else []
         log.info(f"Loaded {len(self.accounts)} upstream account(s)")
+
+        # Phase 2: 如果注入了 stats_store，执行一次性幂等迁移
+        if self.stats_store is not None and isinstance(data, list):
+            try:
+                await self.stats_store.migrate_from_legacy(data)
+            except Exception as e:
+                log.warning("Failed to migrate legacy account stats: %s", e)
 
     async def save(self):
         await self.db.save([a.to_dict() for a in self.accounts])
@@ -234,6 +238,24 @@ class AccountPool:
         else:
             reason = "ready"
 
+        # Phase 2: 从 stats_store 读取聚合 tok/s，回退到内存中的运行时值
+        tok_s_val = acc.tok_s
+        tok_s_updated_val = acc.tok_s_updated_at
+        if self.stats_store is not None:
+            try:
+                entry = self.stats_store.get_by_email(acc.email)
+                if entry and entry.model_stats:
+                    # 计算所有模型的加权平均 tok/s 作为聚合指标
+                    total_tokens = sum(ms.total_tokens for ms in entry.model_stats.values())
+                    if total_tokens > 0:
+                        weighted_sum = sum(
+                            ms.tok_s_ema * ms.total_tokens for ms in entry.model_stats.values()
+                        )
+                        tok_s_val = weighted_sum / total_tokens
+                        tok_s_updated_val = 0.0  # stats_store 不追踪全局更新时间戳
+            except Exception as e:
+                log.debug("Failed to read stats for %s: %s", acc.email, e)
+
         return {
             "email": acc.email,
             "valid": acc.valid,
@@ -254,8 +276,8 @@ class AccountPool:
             "last_used": acc.last_used,
             "last_request_started": acc.last_request_started,
             "last_request_finished": acc.last_request_finished,
-            "tok_s": acc.tok_s,
-            "tok_s_updated_at": acc.tok_s_updated_at,
+            "tok_s": tok_s_val,
+            "tok_s_updated_at": tok_s_updated_val,
         }
 
     def account_diagnostics(self, exclude: set | None = None) -> list[dict]:

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { Button } from "../components/ui/button";
 import {
   Trash2,
@@ -41,8 +42,6 @@ type AccountItem = {
   is_in_cooldown?: boolean;
   selection_block_reason?: string;
   cooldown_ends_at?: number;
-  tok_s?: number;
-  tok_s_updated_at?: number;
 };
 
 function statusStyle(code?: string) {
@@ -99,11 +98,6 @@ function statusNote(acc: AccountItem) {
     return `预计 ${seconds} 秒后恢复`;
   }
   return acc.last_error || "";
-}
-
-function formatTokS(acc: AccountItem) {
-  if (acc.tok_s === undefined || acc.tok_s === null || acc.tok_s <= 0) return "-";
-  return acc.tok_s.toFixed(1);
 }
 
 function localizeError(error?: string) {
@@ -746,7 +740,6 @@ export default function AccountsPage() {
               <th className="h-12 px-6 align-middle">{"账号"}</th>
               <th className="h-12 px-6 align-middle">{"状态"}</th>
               <th className="h-12 px-6 align-middle">{"并发负载"}</th>
-              <th className="h-12 px-6 align-middle">{"tok/s"}</th>
               <th className="h-12 px-6 align-middle">{"代理"}</th>
               <th className="h-12 px-6 align-middle">{"说明"}</th>
               <th className="h-12 px-6 align-middle text-right">{"操作"}</th>
@@ -756,7 +749,7 @@ export default function AccountsPage() {
             {accounts.length === 0 && (
               <tr>
                 <td
-                  colSpan={7}
+                  colSpan={6}
                   className="px-6 py-12 text-center text-muted-foreground"
                 >
                   {"暂无账号，请手动注入或一键获取新号。"}
@@ -769,7 +762,12 @@ export default function AccountsPage() {
                 className="transition-colors hover:bg-black/5 dark:hover:bg-white/5"
               >
                 <td className="px-6 py-4 align-middle font-medium font-mono text-foreground/90">
-                  {acc.email}
+                  <Link
+                    to={`/accounts/${encodeURIComponent(acc.email)}`}
+                    className="text-primary hover:underline"
+                  >
+                    {acc.email}
+                  </Link>
                 </td>
                 <td className="px-6 py-4 align-middle">
                   <span
@@ -784,9 +782,6 @@ export default function AccountsPage() {
                   <span className="inline-flex items-center justify-center bg-muted/50 px-2 py-1 rounded text-xs border">
                     {acc.inflight || 0} {"线程"}
                   </span>
-                </td>
-                <td className="px-6 py-4 align-middle font-mono text-muted-foreground">
-                  {formatTokS(acc)}
                 </td>
                 <td
                   className="px-6 py-4 align-middle text-muted-foreground font-mono max-w-200 truncate"
