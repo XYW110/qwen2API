@@ -51,6 +51,8 @@ class Account:
         self.cooldown_started_at = float(kwargs.pop("cooldown_started_at", 0.0) or 0.0)
         self.tok_s = float(kwargs.get("tok_s", 0.0) or 0.0)
         self.tok_s_updated_at = float(kwargs.get("tok_s_updated_at", 0.0) or 0.0)
+        # Real wall-clock start time for tok/s calculation (not affected by jitter)
+        self._tok_s_start_time = 0.0
 
     def is_rate_limited(self) -> bool:
         return self.rate_limited_until > time.time()
@@ -329,6 +331,7 @@ class AccountPool:
                 preferred.inflight += 1
                 preferred.last_used = now
                 preferred.last_request_started = now + _jitter_seconds()
+                preferred._tok_s_start_time = now
                 self._sticky_email = preferred.email
                 self._record_acquire_diagnostics(
                     strategy="preferred",
@@ -421,6 +424,7 @@ class AccountPool:
             best.inflight += 1
             best.last_used = now
             best.last_request_started = now + _jitter_seconds()
+            best._tok_s_start_time = now
             self._sticky_email = best.email if len(ready) == 1 else None
             self._record_acquire_diagnostics(
                 strategy=strategy,
