@@ -13,6 +13,7 @@ import {
   Settings2,
   Upload,
   Download,
+  Network,
 } from "lucide-react";
 import { toast } from "sonner";
 import { getAuthHeader } from "../lib/auth";
@@ -471,6 +472,54 @@ export default function AccountsPage() {
     );
   };
 
+  const handleEditProxy = async (
+    targetEmail: string,
+    currentProxy?: string
+  ) => {
+    const newProxy = window.prompt(
+      `请输入代理地址（支持 http/https/socks5 协议）：\n\n当前代理：${
+        currentProxy || "无"
+      }`,
+      currentProxy || ""
+    );
+
+    if (newProxy === null) return; // 用户取消
+
+    if (newProxy.trim() === "") {
+      // 清空代理
+      await updateAccountProxy(targetEmail, "");
+    } else if (!newProxy.match(/^(https?|socks5):\/\//)) {
+      toast.error("代理格式无效，请使用 http/https/socks5 协议");
+    } else {
+      await updateAccountProxy(targetEmail, newProxy.trim());
+    }
+  };
+
+  const updateAccountProxy = async (email: string, proxy: string) => {
+    const id = toast.loading(`正在更新代理 ${email}...`);
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/admin/accounts/${encodeURIComponent(email)}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json", ...getAuthHeader() },
+          body: JSON.stringify({ proxy }),
+        }
+      );
+
+      const data = await res.json().catch(() => ({}));
+
+      if (data.ok) {
+        toast.success(`代理已更新：${email}`, { id });
+        fetchAccounts(); // 刷新列表
+      } else {
+        toast.error(data.detail || "更新代理失败", { id });
+      }
+    } catch {
+      toast.error("更新代理请求失败", { id });
+    }
+  };
+
   return (
     <div className="space-y-6 relative">
       <div className="flex justify-between items-center">
@@ -690,6 +739,7 @@ export default function AccountsPage() {
               <th className="h-12 px-6 align-middle">{"账号"}</th>
               <th className="h-12 px-6 align-middle">{"状态"}</th>
               <th className="h-12 px-6 align-middle">{"并发负载"}</th>
+              <th className="h-12 px-6 align-middle">{"代理"}</th>
               <th className="h-12 px-6 align-middle">{"说明"}</th>
               <th className="h-12 px-6 align-middle text-right">{"操作"}</th>
             </tr>
@@ -698,7 +748,7 @@ export default function AccountsPage() {
             {accounts.length === 0 && (
               <tr>
                 <td
-                  colSpan={5}
+                  colSpan={6}
                   className="px-6 py-12 text-center text-muted-foreground"
                 >
                   {"暂无账号，请手动注入或一键获取新号。"}
@@ -728,7 +778,13 @@ export default function AccountsPage() {
                   </span>
                 </td>
                 <td
-                  className="px-6 py-4 align-middle text-muted-foreground max-w-[420px] truncate"
+                  className="px-6 py-4 align-middle text-muted-foreground font-mono max-w-200 truncate"
+                  title={acc.proxy || "无代理"}
+                >
+                  {acc.proxy || "-"}
+                </td>
+                <td
+                  className="px-6 py-4 align-middle text-muted-foreground max-w-420 truncate"
                   title={statusNote(acc)}
                 >
                   {statusNote(acc) || "-"}
@@ -795,6 +851,15 @@ export default function AccountsPage() {
                       title={"清空聊天记录"}
                     >
                       <MessageSquareX className="h-4 w-4" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => handleEditProxy(acc.email, acc.proxy)}
+                      className="h-8 w-8 p-0"
+                      title={"编辑代理"}
+                    >
+                      <Network className="h-4 w-4" />
                     </Button>
                     <Button
                       variant="ghost"

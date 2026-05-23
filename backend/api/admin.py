@@ -493,6 +493,36 @@ async def delete_account(email: str, request: Request):
     return {"ok": True}
 
 
+@router.patch("/accounts/{email}", dependencies=[Depends(verify_admin)])
+async def update_account(email: str, request: Request):
+    """更新账户信息（目前仅支持代理）"""
+    pool: AccountPool = request.app.state.account_pool
+    
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(400, detail="Invalid JSON body")
+    
+    proxy = data.get("proxy", None)
+    
+    # 校验代理格式
+    if proxy is not None and not _is_valid_proxy_url(proxy):
+        raise HTTPException(400, detail="代理格式无效，支持 http/https/socks5 协议")
+    
+    # 查找账户
+    acc = _get_account_or_404(pool, email)
+    
+    # 更新代理
+    if proxy is not None:
+        acc.proxy = proxy.strip() if proxy.strip() else ""
+    else:
+        acc.proxy = ""
+    
+    await pool.save()
+    
+    return {"ok": True, "email": acc.email, "proxy": acc.proxy}
+
+
 @router.get("/accounts/export", dependencies=[Depends(verify_admin)])
 async def export_accounts(request: Request):
     """导出所有账号信息（邮箱:密码|代理 格式）"""
