@@ -127,8 +127,8 @@ export default function AccountsPage() {
   const [isBatchImportOpen, setIsBatchImportOpen] = useState(false);
   const [isBatchExportOpen, setIsBatchExportOpen] = useState(false);
   const [isStrategyConfigOpen, setIsStrategyConfigOpen] = useState(false);
-  const [clearMemories, setClearMemories] = useState(false);
-  const [disableMemory, setDisableMemory] = useState(false);
+  const [clearMemories, setClearMemories] = useState(true);
+  const [disableMemory, setDisableMemory] = useState(true);
   const [clearChats, setClearChats] = useState(false);
 
   // 邮箱+密码字段同时匹配时解锁注册功能
@@ -633,40 +633,6 @@ export default function AccountsPage() {
             />
           </div>
 
-          {/* 记忆配置选项 */}
-          <div className="flex flex-wrap gap-4 text-sm">
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={clearMemories}
-                onChange={(e) => setClearMemories(e.target.checked)}
-                className="w-4 h-4 rounded border-gray-300"
-              />
-              <span>清空记忆</span>
-            </label>
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={disableMemory}
-                onChange={(e) => setDisableMemory(e.target.checked)}
-                className="w-4 h-4 rounded border-gray-300"
-              />
-              <span>不再记忆</span>
-            </label>
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={clearChats}
-                onChange={(e) => setClearChats(e.target.checked)}
-                className="w-4 h-4 rounded border-gray-300"
-              />
-              <span>清空聊天记录</span>
-            </label>
-          </div>
-          <p className="text-xs text-muted-foreground">
-            记忆配置：防止不同账户的记忆互相影响对话
-          </p>
-
           <Button
             onClick={handleAdd}
             variant="secondary"
@@ -675,6 +641,40 @@ export default function AccountsPage() {
             <Plus className="mr-2 h-4 w-4" /> {"添加账号"}
           </Button>
         </div>
+
+        {/* 记忆配置选项 - 单独一行 */}
+        <div className="flex flex-wrap gap-4 text-sm">
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={clearMemories}
+              onChange={(e) => setClearMemories(e.target.checked)}
+              className="w-4 h-4 rounded border-gray-300"
+            />
+            <span>清空记忆</span>
+          </label>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={disableMemory}
+              onChange={(e) => setDisableMemory(e.target.checked)}
+              className="w-4 h-4 rounded border-gray-300"
+            />
+            <span>不再记忆</span>
+          </label>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={clearChats}
+              onChange={(e) => setClearChats(e.target.checked)}
+              className="w-4 h-4 rounded border-gray-300"
+            />
+            <span>清空聊天记录</span>
+          </label>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          记忆配置：防止不同账户的记忆互相影响对话
+        </p>
       </div>
 
       <div className="rounded-2xl border bg-card/30 overflow-hidden">

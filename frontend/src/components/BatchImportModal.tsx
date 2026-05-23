@@ -3,7 +3,14 @@ import { Button } from "./ui/button";
 import { toast } from "sonner";
 import { getAuthHeader } from "../lib/auth";
 import { API_BASE } from "../lib/api";
-import { Upload, X, AlertCircle, CheckCircle, XCircle, SkipForward } from "lucide-react";
+import {
+  Upload,
+  X,
+  AlertCircle,
+  CheckCircle,
+  XCircle,
+  SkipForward,
+} from "lucide-react";
 
 type ImportResult = {
   ok: boolean;
@@ -21,13 +28,17 @@ interface BatchImportModalProps {
   onImportComplete: () => void;
 }
 
-export function BatchImportModal({ isOpen, onClose, onImportComplete }: BatchImportModalProps) {
+export function BatchImportModal({
+  isOpen,
+  onClose,
+  onImportComplete,
+}: BatchImportModalProps) {
   const [accountsText, setAccountsText] = useState("");
   const [concurrency, setConcurrency] = useState(5);
   const [importing, setImporting] = useState(false);
   const [result, setResult] = useState<ImportResult | null>(null);
-  const [clearMemories, setClearMemories] = useState(false);
-  const [disableMemory, setDisableMemory] = useState(false);
+  const [clearMemories, setClearMemories] = useState(true);
+  const [disableMemory, setDisableMemory] = useState(true);
   const [clearChats, setClearChats] = useState(false);
 
   const handleImport = async () => {
@@ -40,17 +51,20 @@ export function BatchImportModal({ isOpen, onClose, onImportComplete }: BatchImp
     const id = toast.loading("正在批量导入账号...");
 
     try {
-      const response = await fetch(`${API_BASE}/api/admin/accounts/batch-import`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...getAuthHeader() },
-        body: JSON.stringify({
-          accounts_text: accountsText,
-          concurrency,
-          clear_memories: clearMemories,
-          disable_memory: disableMemory,
-          clear_chats: clearChats,
-        }),
-      });
+      const response = await fetch(
+        `${API_BASE}/api/admin/accounts/batch-import`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...getAuthHeader() },
+          body: JSON.stringify({
+            accounts_text: accountsText,
+            concurrency,
+            clear_memories: clearMemories,
+            disable_memory: disableMemory,
+            clear_chats: clearChats,
+          }),
+        }
+      );
 
       const data = await response.json();
       setResult(data);
@@ -74,8 +88,8 @@ export function BatchImportModal({ isOpen, onClose, onImportComplete }: BatchImp
   const handleClose = () => {
     setAccountsText("");
     setResult(null);
-    setClearMemories(false);
-    setDisableMemory(false);
+    setClearMemories(true);
+    setDisableMemory(true);
     setClearChats(false);
     onClose();
   };
@@ -85,11 +99,11 @@ export function BatchImportModal({ isOpen, onClose, onImportComplete }: BatchImp
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       {/* Backdrop */}
-      <div 
-        className="absolute inset-0 bg-black/50 backdrop-blur-sm" 
+      <div
+        className="absolute inset-0 bg-black/50 backdrop-blur-sm"
         onClick={handleClose}
       />
-      
+
       {/* Modal */}
       <div className="relative z-10 w-full max-w-2xl mx-4 bg-background rounded-xl border shadow-2xl max-h-[90vh] overflow-hidden flex flex-col">
         {/* Header */}
@@ -98,7 +112,12 @@ export function BatchImportModal({ isOpen, onClose, onImportComplete }: BatchImp
             <Upload className="h-5 w-5 text-primary" />
             <h2 className="text-lg font-semibold">批量导入账号</h2>
           </div>
-          <Button variant="ghost" size="sm" onClick={handleClose} className="h-8 w-8 p-0">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={handleClose}
+            className="h-8 w-8 p-0"
+          >
             <X className="h-4 w-4" />
           </Button>
         </div>
@@ -109,8 +128,20 @@ export function BatchImportModal({ isOpen, onClose, onImportComplete }: BatchImp
           <div className="rounded-lg bg-muted p-3">
             <p className="text-sm font-medium mb-2">支持格式：</p>
             <ul className="text-xs text-muted-foreground space-y-1">
-              <li>• <code className="bg-muted-foreground/10 px-1 rounded">email:password</code> - 邮箱+密码</li>
-              <li>• <code className="bg-muted-foreground/10 px-1 rounded">email:password|proxy_url</code> - 邮箱+密码+代理</li>
+              <li>
+                •{" "}
+                <code className="bg-muted-foreground/10 px-1 rounded">
+                  email:password
+                </code>{" "}
+                - 邮箱+密码
+              </li>
+              <li>
+                •{" "}
+                <code className="bg-muted-foreground/10 px-1 rounded">
+                  email:password|proxy_url
+                </code>{" "}
+                - 邮箱+密码+代理
+              </li>
               <li>• 每行一个账号，支持多行批量导入</li>
             </ul>
           </div>
@@ -146,7 +177,6 @@ export function BatchImportModal({ isOpen, onClose, onImportComplete }: BatchImp
             </div>
           </div>
 
-          
           {/* 记忆配置选项 */}
           <div className="space-y-2">
             <div className="flex flex-wrap gap-4 text-sm">
@@ -209,7 +239,7 @@ export function BatchImportModal({ isOpen, onClose, onImportComplete }: BatchImp
                   <div className="text-xs text-muted-foreground">格式错误</div>
                 </div>
               </div>
-              
+
               {/* 失败详情 */}
               {result.failed > 0 && (
                 <div className="mt-2">
@@ -234,7 +264,10 @@ export function BatchImportModal({ isOpen, onClose, onImportComplete }: BatchImp
           <Button variant="outline" onClick={handleClose}>
             {result ? "关闭" : "取消"}
           </Button>
-          <Button onClick={handleImport} disabled={importing || !accountsText.trim()}>
+          <Button
+            onClick={handleImport}
+            disabled={importing || !accountsText.trim()}
+          >
             {importing ? (
               <>
                 <Upload className="mr-2 h-4 w-4 animate-spin" />
