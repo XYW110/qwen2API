@@ -26,6 +26,9 @@ export function BatchImportModal({ isOpen, onClose, onImportComplete }: BatchImp
   const [concurrency, setConcurrency] = useState(5);
   const [importing, setImporting] = useState(false);
   const [result, setResult] = useState<ImportResult | null>(null);
+  const [clearMemories, setClearMemories] = useState(false);
+  const [disableMemory, setDisableMemory] = useState(false);
+  const [clearChats, setClearChats] = useState(false);
 
   const handleImport = async () => {
     if (!accountsText.trim()) {
@@ -43,6 +46,9 @@ export function BatchImportModal({ isOpen, onClose, onImportComplete }: BatchImp
         body: JSON.stringify({
           accounts_text: accountsText,
           concurrency,
+          clear_memories: clearMemories,
+          disable_memory: disableMemory,
+          clear_chats: clearChats,
         }),
       });
 
@@ -68,6 +74,9 @@ export function BatchImportModal({ isOpen, onClose, onImportComplete }: BatchImp
   const handleClose = () => {
     setAccountsText("");
     setResult(null);
+    setClearMemories(false);
+    setDisableMemory(false);
+    setClearChats(false);
     onClose();
   };
 
@@ -135,6 +144,43 @@ export function BatchImportModal({ isOpen, onClose, onImportComplete }: BatchImp
               <span>推荐 5-10</span>
               <span>20</span>
             </div>
+          </div>
+
+          
+          {/* 记忆配置选项 */}
+          <div className="space-y-2">
+            <div className="flex flex-wrap gap-4 text-sm">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={clearMemories}
+                  onChange={(e) => setClearMemories(e.target.checked)}
+                  className="w-4 h-4 rounded border-gray-300"
+                />
+                <span>清空记忆</span>
+              </label>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={disableMemory}
+                  onChange={(e) => setDisableMemory(e.target.checked)}
+                  className="w-4 h-4 rounded border-gray-300"
+                />
+                <span>不再记忆</span>
+              </label>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={clearChats}
+                  onChange={(e) => setClearChats(e.target.checked)}
+                  className="w-4 h-4 rounded border-gray-300"
+                />
+                <span>清空聊天记录</span>
+              </label>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              记忆配置：防止不同账户的记忆互相影响对话
+            </p>
           </div>
 
           {/* 导入结果 */}

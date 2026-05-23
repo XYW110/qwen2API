@@ -153,6 +153,10 @@ async def add_account(request: Request):
     token = data.get("token", "")
     email = data.get("email", "")
     password = data.get("password", "")
+    # 记忆配置选项：防止账户间记忆互相影响
+    clear_memories = data.get("clear_memories", False)
+    disable_memory = data.get("disable_memory", False)
+    clear_chats = data.get("clear_chats", False)
 
     # 向后兼容: 支持 token 直传 或 email+password 自动登录
     if not token and not (email and password):
@@ -181,6 +185,33 @@ async def add_account(request: Request):
         return {"ok": False, "error": "Invalid token (验证失败，请确认Token有效)"}
 
     await pool.add(acc)
+
+    # 根据配置执行记忆操作
+    import logging
+    log = logging.getLogger("backend.api.admin")
+    if clear_memories:
+        try:
+            await client.clear_memories(acc.token)
+            log.info(f"[记忆操作] {acc.email} 清空记忆成功")
+        except Exception as e:
+            log.warning(f"[记忆操作] {acc.email} 清空记忆失败: {e}")
+    if disable_memory:
+        try:
+            await client.disable_update_memory(acc.token)
+            log.info(f"[记忆操作] {acc.email} 关闭更新记忆成功")
+        except Exception as e:
+            log.warning(f"[记忆操作] {acc.email} 关闭更新记忆失败: {e}")
+        try:
+            await client.disable_memory(acc.token)
+            log.info(f"[记忆操作] {acc.email} 关闭记忆成功")
+        except Exception as e:
+            log.warning(f"[记忆操作] {acc.email} 关闭记忆失败: {e}")
+    if clear_chats:
+        try:
+            await client.clear_all_chats(acc.token)
+            log.info(f"[记忆操作] {acc.email} 清空聊天记录成功")
+        except Exception as e:
+            log.warning(f"[记忆操作] {acc.email} 清空聊天记录失败: {e}")
     return {"ok": True, "email": acc.email}
 
 
@@ -213,6 +244,10 @@ async def batch_import_accounts(request: Request):
 
     accounts_text = data.get("accounts_text", "")
     concurrency = min(20, max(1, int(data.get("concurrency", 5))))
+    # 记忆配置选项：防止账户间记忆互相影响
+    clear_memories = data.get("clear_memories", False)
+    disable_memory = data.get("disable_memory", False)
+    clear_chats = data.get("clear_chats", False)
 
     if not accounts_text:
         raise HTTPException(400, detail="accounts_text 不能为空")
@@ -277,6 +312,32 @@ async def batch_import_accounts(request: Request):
                 proxy=proxy,
             )
             await pool.add(acc)
+            # 根据配置执行记忆操作
+            import logging
+            log = logging.getLogger("backend.api.admin")
+            if clear_memories:
+                try:
+                    await client.clear_memories(acc.token)
+                    log.info(f"[记忆操作] {acc.email} 清空记忆成功")
+                except Exception as e:
+                    log.warning(f"[记忆操作] {acc.email} 清空记忆失败: {e}")
+            if disable_memory:
+                try:
+                    await client.disable_update_memory(acc.token)
+                    log.info(f"[记忆操作] {acc.email} 关闭更新记忆成功")
+                except Exception as e:
+                    log.warning(f"[记忆操作] {acc.email} 关闭更新记忆失败: {e}")
+                try:
+                    await client.disable_memory(acc.token)
+                    log.info(f"[记忆操作] {acc.email} 关闭记忆成功")
+                except Exception as e:
+                    log.warning(f"[记忆操作] {acc.email} 关闭记忆失败: {e}")
+            if clear_chats:
+                try:
+                    await client.clear_all_chats(acc.token)
+                    log.info(f"[记忆操作] {acc.email} 清空聊天记录成功")
+                except Exception as e:
+                    log.warning(f"[记忆操作] {acc.email} 清空聊天记录失败: {e}")
             success_count += 1
             results.append({"email": email, "ok": True})
 

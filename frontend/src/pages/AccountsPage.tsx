@@ -127,6 +127,9 @@ export default function AccountsPage() {
   const [isBatchImportOpen, setIsBatchImportOpen] = useState(false);
   const [isBatchExportOpen, setIsBatchExportOpen] = useState(false);
   const [isStrategyConfigOpen, setIsStrategyConfigOpen] = useState(false);
+  const [clearMemories, setClearMemories] = useState(false);
+  const [disableMemory, setDisableMemory] = useState(false);
+  const [clearChats, setClearChats] = useState(false);
 
   // 邮箱+密码字段同时匹配时解锁注册功能
   useEffect(() => {
@@ -212,6 +215,9 @@ export default function AccountsPage() {
             setPassword("");
             setToken("");
             setProxy("");
+            setClearMemories(false);
+            setDisableMemory(false);
+            setClearChats(false);
             fetchAccounts();
           } else {
             toast.error(localizeError(data.error) || "账号注入失败", {
@@ -231,6 +237,9 @@ export default function AccountsPage() {
           email,
           password,
           proxy,
+          clear_memories: clearMemories,
+          disable_memory: disableMemory,
+          clear_chats: clearChats,
         }),
       })
         .then((res) => res.json())
@@ -240,6 +249,9 @@ export default function AccountsPage() {
             setEmail("");
             setPassword("");
             setProxy("");
+            setClearMemories(false);
+            setDisableMemory(false);
+            setClearChats(false);
             fetchAccounts();
           } else {
             toast.error(localizeError(data.error) || "账号添加失败", {
@@ -620,6 +632,40 @@ export default function AccountsPage() {
               placeholder={"https://proxy:8080"}
             />
           </div>
+
+          {/* 记忆配置选项 */}
+          <div className="flex flex-wrap gap-4 text-sm">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={clearMemories}
+                onChange={(e) => setClearMemories(e.target.checked)}
+                className="w-4 h-4 rounded border-gray-300"
+              />
+              <span>清空记忆</span>
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={disableMemory}
+                onChange={(e) => setDisableMemory(e.target.checked)}
+                className="w-4 h-4 rounded border-gray-300"
+              />
+              <span>不再记忆</span>
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={clearChats}
+                onChange={(e) => setClearChats(e.target.checked)}
+                className="w-4 h-4 rounded border-gray-300"
+              />
+              <span>清空聊天记录</span>
+            </label>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            记忆配置：防止不同账户的记忆互相影响对话
+          </p>
 
           <Button
             onClick={handleAdd}
