@@ -49,6 +49,8 @@ class Account:
         self.consecutive_failures = int(kwargs.get("consecutive_failures", 0) or 0)
         self.rate_limit_strikes = int(kwargs.get("rate_limit_strikes", 0) or 0)
         self.cooldown_started_at = float(kwargs.pop("cooldown_started_at", 0.0) or 0.0)
+        self.tok_s = float(kwargs.get("tok_s", 0.0) or 0.0)
+        self.tok_s_updated_at = float(kwargs.get("tok_s_updated_at", 0.0) or 0.0)
 
     def is_rate_limited(self) -> bool:
         return self.rate_limited_until > time.time()
@@ -97,6 +99,27 @@ class Account:
         }
         return status_map.get(self.get_status_code(), "未知")
 
+    def update_tok_s(self, tokens: int, elapsed_seconds: float) -> None:
+        """使用 EMA 更新 tok/s
+
+        Args:
+            tokens: 本次请求生成的 token 数
+            elapsed_seconds: 本次请求耗时（秒）
+        """
+        if elapsed_seconds <= 0 or tokens <= 0:
+            return
+
+        current_tok_s = tokens / elapsed_seconds
+
+        # 使用 EMA (指数移动平均) 平滑更新
+        # 新值权重 0.3，历史值权重 0.7
+        if self.tok_s > 0:
+            self.tok_s = self.tok_s * 0.7 + current_tok_s * 0.3
+        else:
+            self.tok_s = current_tok_s
+
+        self.tok_s_updated_at = time.time()
+
     def to_dict(self):
         return {
             "email": self.email,
@@ -112,6 +135,8 @@ class Account:
             "last_request_finished": self.last_request_finished,
             "consecutive_failures": self.consecutive_failures,
             "rate_limit_strikes": self.rate_limit_strikes,
+            "tok_s": self.tok_s,
+            "tok_s_updated_at": self.tok_s_updated_at,
         }
 
 
@@ -227,6 +252,8 @@ class AccountPool:
             "last_used": acc.last_used,
             "last_request_started": acc.last_request_started,
             "last_request_finished": acc.last_request_finished,
+            "tok_s": acc.tok_s,
+            "tok_s_updated_at": acc.tok_s_updated_at,
         }
 
     def account_diagnostics(self, exclude: set | None = None) -> list[dict]:

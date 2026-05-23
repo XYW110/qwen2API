@@ -192,6 +192,11 @@ async def run_completion_bridge(
             extra_prompt_tokens=getattr(standard_request, "context_attachment_tokens", 0),
         )
         await add_used_tokens(users_db, token, usage_delta if usage_delta is not None else usage["total_tokens"])
+        # Update tok/s for account
+        if execution.acc and hasattr(execution.acc, 'last_request_finished') and hasattr(execution.acc, 'last_request_started'):
+            elapsed_seconds = execution.acc.last_request_finished - execution.acc.last_request_started
+            if elapsed_seconds > 0 and usage["completion_tokens"] > 0:
+                execution.acc.update_tok_s(usage["completion_tokens"], elapsed_seconds)
         await cleanup_runtime_resources(
             client,
             execution.acc,
@@ -284,6 +289,11 @@ async def run_retryable_completion_bridge(
             )
             usage_delta = usage_delta_factory(execution, current_prompt) if usage_delta_factory is not None else usage["total_tokens"]
             await add_used_tokens(users_db, token, usage_delta)
+            # Update tok/s for account
+            if execution.acc and hasattr(execution.acc, 'last_request_finished') and hasattr(execution.acc, 'last_request_started'):
+                elapsed_seconds = execution.acc.last_request_finished - execution.acc.last_request_started
+                if elapsed_seconds > 0 and usage["completion_tokens"] > 0:
+                    execution.acc.update_tok_s(usage["completion_tokens"], elapsed_seconds)
             await cleanup_runtime_resources(
                 client,
                 execution.acc,
