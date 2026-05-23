@@ -185,8 +185,16 @@ class OpenAIStreamTranslator:
             'model': self.model_name,
             'choices': [{'index': 0, 'delta': {}, 'finish_reason': final_finish_reason}],
         }
-        if usage is not None:
-            finish_payload['usage'] = usage
         chunks.append(f"data: {json.dumps(finish_payload, ensure_ascii=False)}\n\n")
+        if usage is not None:
+            usage_payload = {
+                'id': self.completion_id,
+                'object': 'chat.completion.chunk',
+                'created': self.created,
+                'model': self.model_name,
+                'choices': [],
+                'usage': usage,
+            }
+            chunks.append(f"data: {json.dumps(usage_payload, ensure_ascii=False)}\n\n")
         chunks.append("data: [DONE]\n\n")
         return chunks

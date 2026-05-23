@@ -19,6 +19,7 @@ from backend.services.response_formatters import build_openai_completion_payload
 from backend.services.token_calc import calculate_usage
 from backend.services.qwen_client import QwenClient
 from backend.services.standard_request_builder import build_chat_standard_request
+from backend.toolcore.request_singleflight import RequestSingleflight
 from backend.toolcore.task_session import (
     build_openai_assistant_history_message,
     clear_invalidated_session_chat,
@@ -31,6 +32,9 @@ from backend.runtime.execution import RuntimeAttemptState, RuntimeToolDirective,
 log = logging.getLogger("qwen2api.chat")
 router = APIRouter()
 OpenAIDeltaHandler = Callable[[dict[str, Any], str | None, list[dict[str, Any]] | None], Awaitable[None]]
+_openai_json_singleflight = RequestSingleflight(
+    result_ttl_seconds=settings.OPENAI_JSON_SINGLEFLIGHT_RESULT_TTL_SECONDS,
+)
 
 
 def _stream_usage(result, prompt: str) -> dict[str, int]:
@@ -51,6 +55,37 @@ def _detect_openai_client_profile(request: Request, req_data: dict) -> str:
 
 def _short_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()[:16]
+
+
+def _stable_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _build_openai_json_singleflight_key(
+    *,
+    session_key: str,
+    standard_request: StandardRequest,
+    diagnostics: dict[str, Any],
+) -> tuple[Any, ...] | None:
+    if standard_request.stream:
+        return None
+    prompt_hash = str(diagnostics.get("prompt_hash") or "")
+    latest_user_hash = str(diagnostics.get("latest_user_hash") or "")
+    if not session_key or not prompt_hash or not latest_user_hash:
+        return None
+    return (
+        "openai-json",
+        session_key,
+        standard_request.client_profile,
+        standard_request.response_model,
+        standard_request.resolved_model,
+        tuple(standard_request.tool_names or []),
+        standard_request.tool_choice_mode,
+        standard_request.required_tool_name or "",
+        _stable_json(standard_request.tool_choice_raw),
+        prompt_hash,
+        latest_user_hash,
+    )
 
 
 def _text_from_message_content(content: Any) -> str:
@@ -463,6 +498,109 @@ def _log_outbound_tool_call_diagnostics(
         )
 
 
+def _openai_stream_chunk_summary(chunk: str) -> dict[str, Any] | None:
+    if not isinstance(chunk, str) or not chunk.startswith("data: "):
+        return None
+    data = chunk[6:].strip()
+    if not data:
+        return None
+    if data == "[DONE]":
+        return {"kind": "done"}
+    try:
+        payload = json.loads(data)
+    except json.JSONDecodeError:
+        return {"kind": "parse_error", "bytes": len(chunk.encode("utf-8", errors="ignore"))}
+    choices = payload.get("choices") if isinstance(payload, dict) else None
+    if not isinstance(choices, list) or not choices:
+        return {"kind": "usage" if isinstance(payload, dict) and payload.get("usage") is not None else "empty_choices"}
+    choice = choices[0] if isinstance(choices[0], dict) else {}
+    delta = choice.get("delta") if isinstance(choice, dict) else {}
+    delta = delta if isinstance(delta, dict) else {}
+    tool_calls = delta.get("tool_calls")
+    tool_details = []
+    if isinstance(tool_calls, list):
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict):
+                continue
+            function = tool_call.get("function")
+            function = function if isinstance(function, dict) else {}
+            arguments = function.get("arguments")
+            tool_details.append(
+                {
+                    "index": tool_call.get("index"),
+                    "id": tool_call.get("id"),
+                    "type": tool_call.get("type"),
+                    "name": function.get("name"),
+                    "has_arguments": isinstance(arguments, str),
+                    "arguments_chars": len(arguments) if isinstance(arguments, str) else 0,
+                }
+            )
+    return {
+        "kind": "choice",
+        "role": delta.get("role"),
+        "delta_keys": sorted(str(key) for key in delta.keys()),
+        "tool_details": tool_details,
+        "finish_reason": choice.get("finish_reason"),
+    }
+
+
+def _log_openai_stream_protocol_diagnostics(
+    *,
+    req_id: str,
+    completion_id: str,
+    prompt_hash: str,
+    chunks: list[str],
+) -> None:
+    summaries = [_openai_stream_chunk_summary(chunk) for chunk in chunks]
+    summaries = [summary for summary in summaries if summary is not None]
+    role_positions = [index for index, summary in enumerate(summaries) if summary.get("role") == "assistant"]
+    tool_positions = [index for index, summary in enumerate(summaries) if summary.get("tool_details")]
+    finish_positions = [
+        {"index": index, "finish_reason": summary.get("finish_reason")}
+        for index, summary in enumerate(summaries)
+        if summary.get("finish_reason") is not None
+    ]
+    usage_positions = [index for index, summary in enumerate(summaries) if summary.get("kind") == "usage"]
+    done_positions = [index for index, summary in enumerate(summaries) if summary.get("kind") == "done"]
+    first_role = role_positions[0] if role_positions else None
+    first_tool = tool_positions[0] if tool_positions else None
+    role_before_tool = first_role is not None and first_tool is not None and first_role < first_tool
+    sequence: list[str] = []
+    tool_details: list[dict[str, Any]] = []
+    for index, summary in enumerate(summaries[:12]):
+        if summary.get("kind") == "done":
+            sequence.append(f"{index}:done")
+            continue
+        if summary.get("kind") == "usage":
+            sequence.append(f"{index}:usage")
+            continue
+        if summary.get("kind") == "parse_error":
+            sequence.append(f"{index}:parse_error")
+            continue
+        if summary.get("role"):
+            sequence.append(f"{index}:role={summary.get('role')}")
+        for detail in summary.get("tool_details") or []:
+            sequence.append(f"{index}:tool={detail.get('name') or '<args>'}")
+            tool_details.append(detail)
+        if summary.get("finish_reason") is not None:
+            sequence.append(f"{index}:finish={summary.get('finish_reason')}")
+    log.info(
+        "[OAI] stream_tool_protocol req_id=%s completion_id=%s prompt_hash=%s chunks=%s role_positions=%s tool_positions=%s role_before_first_tool=%s finish_positions=%s usage_positions=%s done_positions=%s sequence=%s tool_details=%s",
+        req_id,
+        completion_id,
+        prompt_hash,
+        len(summaries),
+        role_positions,
+        tool_positions,
+        role_before_tool,
+        finish_positions,
+        usage_positions,
+        done_positions,
+        sequence,
+        tool_details,
+    )
+
+
 def _log_openai_stream_sse_chunk(*, req_id: str, completion_id: str, prompt_hash: str, chunk: str) -> None:
     if not isinstance(chunk, str) or not chunk.startswith("data: "):
         return
@@ -524,16 +662,17 @@ def _log_openai_stream_sse_chunk(*, req_id: str, completion_id: str, prompt_hash
                 }
             )
     finish_reason = choice.get("finish_reason")
-    if not tool_calls and finish_reason is None:
+    if not tool_calls and finish_reason is None and delta.get("role") is None:
         return
     content = str(delta.get("content") or "")
     log.info(
-        "[OAI] stream_sse_chunk req_id=%s completion_id=%s prompt_hash=%s choices=%s role=%s has_content=%s content_chars=%s content_preview=%r has_tool_calls=%s tool_names=%s tool_details=%s finish_reason=%s",
+        "[OAI] stream_sse_chunk req_id=%s completion_id=%s prompt_hash=%s choices=%s role=%s delta_keys=%s has_content=%s content_chars=%s content_preview=%r has_tool_calls=%s tool_names=%s tool_details=%s finish_reason=%s",
         req_id,
         completion_id,
         prompt_hash,
         len(choices),
         delta.get("role"),
+        sorted(str(key) for key in delta.keys()),
         "content" in delta,
         len(content),
         _truncate_log_value(content, limit=160),
@@ -759,7 +898,56 @@ async def chat_completions(request: Request):
             prompt=early_standard_request.prompt,
         ))
 
-    context_prepared = await prepare_context_attachments(app=app, payload=req_data, surface="openai", auth_token=token, client_profile=client_profile, existing_attachments=(preprocessed.attachments if preprocessed is not None else None))
+    singleflight_key = None
+    singleflight_owner = False
+    if settings.OPENAI_JSON_SINGLEFLIGHT_ENABLED and not early_standard_request.stream:
+        singleflight_key = _build_openai_json_singleflight_key(
+            session_key=session_key,
+            standard_request=early_standard_request,
+            diagnostics=early_diagnostics,
+        )
+        if singleflight_key is not None:
+            entry, singleflight_owner, cached_payload = await _openai_json_singleflight.start_or_join(
+                singleflight_key,
+                owner_id=req_id,
+            )
+            if cached_payload is not None:
+                log.warning(
+                    "[OAI] duplicate_json_request_cache_hit req_id=%s completion_id=%s session=%s prompt_hash=%s latest_user_hash=%s",
+                    req_id,
+                    completion_id,
+                    session_key,
+                    early_diagnostics["prompt_hash"],
+                    early_diagnostics["latest_user_hash"],
+                )
+                return JSONResponse(cached_payload)
+            if not singleflight_owner and entry is not None:
+                age_seconds = max(0.0, _openai_json_singleflight.now() - entry.created_at)
+                log.warning(
+                    "[OAI] duplicate_json_request_join req_id=%s owner_req_id=%s completion_id=%s session=%s prompt_hash=%s latest_user_hash=%s age=%.3f",
+                    req_id,
+                    entry.owner_id,
+                    completion_id,
+                    session_key,
+                    early_diagnostics["prompt_hash"],
+                    early_diagnostics["latest_user_hash"],
+                    age_seconds,
+                )
+                try:
+                    payload = await asyncio.wait_for(
+                        asyncio.shield(entry.future),
+                        timeout=settings.OPENAI_JSON_SINGLEFLIGHT_WAIT_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError as exc:
+                    raise HTTPException(status_code=504, detail="Timed out waiting for original duplicate request") from exc
+                return JSONResponse(payload)
+
+    try:
+        context_prepared = await prepare_context_attachments(app=app, payload=req_data, surface="openai", auth_token=token, client_profile=client_profile, existing_attachments=(preprocessed.attachments if preprocessed is not None else None))
+    except Exception as e:
+        if singleflight_owner and singleflight_key is not None:
+            await _openai_json_singleflight.fail(singleflight_key, e)
+        raise
     req_data = context_prepared["payload"]
     standard_request = _build_standard_request(req_data, client_profile=client_profile)
     if preprocessed is not None:
@@ -880,13 +1068,16 @@ async def chat_completions(request: Request):
                     media_type="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
                 )
-            return JSONResponse(_build_openai_text_payload(
+            payload = _build_openai_text_payload(
                 completion_id=completion_id,
                 created=created,
                 model_name=model_name,
                 content=notice,
                 prompt=prompt,
-            ))
+            )
+            if singleflight_owner and singleflight_key is not None:
+                await _openai_json_singleflight.complete(singleflight_key, payload)
+            return JSONResponse(payload)
 
         if standard_request.stream:
             async def generate():
@@ -899,12 +1090,13 @@ async def chat_completions(request: Request):
                             if standard_request.tools:
                                 translator: OpenAIStreamTranslator | None = None
                                 staged_chunks: list[str] = []
+                                emitted_protocol_chunks: list[str] = []
                                 emitted_tool_call_chunks: list[str] = []
                                 buffered_content_chars = 0
                                 min_stream_content_chars = 80
 
                                 async def on_attempt_start(_attempt_index: int, _attempt_prompt: str) -> None:
-                                    nonlocal translator, staged_chunks, emitted_tool_call_chunks, buffered_content_chars
+                                    nonlocal translator, staged_chunks, emitted_protocol_chunks, emitted_tool_call_chunks, buffered_content_chars
                                     translator = OpenAIStreamTranslator(
                                         completion_id=completion_id,
                                         created=created,
@@ -919,19 +1111,21 @@ async def chat_completions(request: Request):
                                         tool_catalog=standard_request.tool_catalog,
                                     )
                                     staged_chunks = []
+                                    emitted_protocol_chunks = []
                                     emitted_tool_call_chunks = []
                                     buffered_content_chars = 0
 
                                 streamed_content_to_client = False
 
                                 async def on_retry(_attempt_index: int, _retry, _execution) -> None:
-                                    nonlocal staged_chunks, emitted_tool_call_chunks, buffered_content_chars
+                                    nonlocal staged_chunks, emitted_protocol_chunks, emitted_tool_call_chunks, buffered_content_chars
                                     staged_chunks = []
+                                    emitted_protocol_chunks = []
                                     emitted_tool_call_chunks = []
                                     buffered_content_chars = 0
 
                                 async def on_delta(evt: dict[str, Any], text_chunk: str | None, tool_calls: list[dict[str, Any]] | None) -> None:
-                                    nonlocal staged_chunks, emitted_tool_call_chunks, streamed_content_to_client, buffered_content_chars
+                                    nonlocal staged_chunks, emitted_protocol_chunks, emitted_tool_call_chunks, streamed_content_to_client, buffered_content_chars
                                     if translator is None:
                                         return
                                     translator.on_delta(evt, text_chunk, tool_calls)
@@ -939,6 +1133,7 @@ async def chat_completions(request: Request):
                                         chunk = translator.pending_chunks.pop(0)
                                         content_text = _openai_content_delta_text(chunk)
                                         if content_text is None:
+                                            emitted_protocol_chunks.append(chunk)
                                             if _is_openai_tool_call_delta_chunk(chunk):
                                                 emitted_tool_call_chunks.append(chunk)
                                             await queue.put(chunk)
@@ -1045,7 +1240,15 @@ async def chat_completions(request: Request):
                                         usage=usage,
                                         answer_text=execution.state.answer_text or "",
                                     )
-                                    for chunk in translator.finalize(final_finish_reason, usage=usage):
+                                    final_chunks = translator.finalize(final_finish_reason, usage=usage)
+                                    if final_finish_reason == "tool_calls":
+                                        _log_openai_stream_protocol_diagnostics(
+                                            req_id=req_id,
+                                            completion_id=completion_id,
+                                            prompt_hash=diagnostics["prompt_hash"],
+                                            chunks=emitted_protocol_chunks + output_staged_chunks + final_chunks,
+                                        )
+                                    for chunk in final_chunks:
                                         await queue.put(chunk)
                             else:
                                 translator = OpenAIStreamTranslator(
@@ -1236,14 +1439,19 @@ async def chat_completions(request: Request):
                     len(execution.state.answer_text or ""),
                 )
 
-                return JSONResponse(build_openai_completion_payload(
+                payload = build_openai_completion_payload(
                     completion_id=completion_id,
                     created=created,
                     model_name=model_name,
                     prompt=result.prompt,
                     execution=execution,
                     standard_request=standard_request,
-                ))
+                )
+                if singleflight_owner and singleflight_key is not None:
+                    await _openai_json_singleflight.complete(singleflight_key, payload)
+                return JSONResponse(payload)
         except Exception as e:
+            if singleflight_owner and singleflight_key is not None:
+                await _openai_json_singleflight.fail(singleflight_key, e)
             await clear_invalidated_session_chat(app=app, request=standard_request)
             raise HTTPException(status_code=500, detail=str(e))
