@@ -33,17 +33,24 @@ async def list_models(request: Request):
         upstream_models = []
 
     if upstream_models:
-        return JSONResponse({
-            "object": "list",
-            "data": [
-                {
-                    "id": item.get("id") or item.get("model") or item.get("name") or str(item),
-                    "object": "model",
-                    "owned_by": item.get("owned_by", "qwen2api"),
-                }
-                for item in upstream_models
-            ],
-        })
+        seen: set[str] = set()
+        data: list[dict] = []
+        for item in upstream_models:
+            model_id = item.get("id") or item.get("model") or item.get("name") or str(item)
+            if model_id in seen:
+                continue
+            seen.add(model_id)
+            data.append({
+                "id": model_id,
+                "object": "model",
+                "owned_by": item.get("owned_by", "qwen2api"),
+            })
+        for model_id in MODEL_MAP:
+            if model_id in seen:
+                continue
+            seen.add(model_id)
+            data.append({"id": model_id, "object": "model", "owned_by": "qwen2api"})
+        return JSONResponse({"object": "list", "data": data})
     return JSONResponse(_build_model_list_payload())
 
 

@@ -120,7 +120,6 @@ MODEL_MAP = {
     "qwen-max":              "qwen3.6-plus",
     "qwen-plus":             "qwen3.6-plus",
     "qwen-turbo":            "qwen3.5-flash",
-    "qwen3.7-max":           "qwen3.7-max",
     "qwen3.7-plus-preview":  "qwen-latest-series-invite-beta-v16",
     # DeepSeek
     "deepseek-chat":     "qwen3.6-plus",
