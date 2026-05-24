@@ -387,6 +387,7 @@ async def anthropic_messages(request: Request):
                             update_request_context(requested_model=model_name, resolved_model=qwen_model)
                             log.info(f"[ANT] model={qwen_model}, stream={standard_request.stream}, tool_enabled={standard_request.tool_enabled}, tools={[t.get('name') for t in standard_request.tools]}, prompt_len={len(prompt)}")
                             current_prompt = prompt
+                            history_messages = original_history_messages
                             max_attempts = request_max_attempts(standard_request)
 
                             for stream_attempt in range(max_attempts):
