@@ -9,6 +9,7 @@ import {
   X,
   Image,
   AlertTriangle,
+  Clock,
 } from "lucide-react";
 import { useState } from "react";
 
@@ -19,6 +20,7 @@ export default function AdminLayout() {
   const navs = [
     { name: "运行状态", path: "/", icon: LayoutDashboard },
     { name: "账号管理", path: "/accounts", icon: Activity },
+    { name: "待审批", path: "/pending-accounts", icon: Clock },
     { name: "API Key", path: "/tokens", icon: Key },
     { name: "失败记录", path: "/failures", icon: AlertTriangle },
     { name: "接口测试", path: "/test", icon: MessageSquare },

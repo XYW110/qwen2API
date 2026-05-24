@@ -29,7 +29,7 @@ from backend.toolcore.context_offload import ContextOffloader
 from backend.services.response_store import InMemoryResponseStore
 from backend.services.upstream_file_uploader import UpstreamFileUploader
 import backend.api.models as models
-from backend.api import admin, v1_chat, responses_api, probes, anthropic, gemini, embeddings, images, files_api
+from backend.api import admin, v1_chat, responses_api, probes, anthropic, gemini, embeddings, images, files_api, public
 from backend.services.garbage_collector import garbage_collect_chats
 from backend.services.context_cleanup import context_cleanup_loop
 
@@ -95,6 +95,12 @@ async def lifespan(app: FastAPI):
         app.state.session_locks = SessionLockRegistry()
         app.state.response_store = InMemoryResponseStore()
 
+        # 初始化待审批账户存储
+        from backend.core.pending_account_store import PendingAccountStore
+        pending_account_store = PendingAccountStore()
+        await pending_account_store.load()
+        app.state.pending_account_store = pending_account_store
+
         # 加载账号并启动后台清理任务
         await app.state.account_pool.load()
         await app.state.file_store.load()
@@ -139,6 +145,7 @@ app.include_router(embeddings.router, tags=["Embeddings"])
 app.include_router(images.router, tags=["Images"])
 app.include_router(files_api.router, tags=["Files"])
 app.include_router(probes.router, tags=["Probes"])
+app.include_router(public.router, prefix="/api", tags=["Public"])
 app.include_router(admin.router, prefix="/api/admin", tags=["Dashboard Admin"])
 
 @app.get("/api", tags=["System"])

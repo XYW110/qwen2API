@@ -255,7 +255,7 @@ export default function TokensPage() {
                           type="text"
                           value={noteValue}
                           onChange={(e) => setNoteValue(e.target.value)}
-                          className="flex h-9 w-full min-w-[10rem] rounded-md border border-input bg-background px-3 py-1.5 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          className="flex h-9 w-full min-w-40 rounded-md border border-input bg-background px-3 py-1.5 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                           autoFocus
                         />
                         <Button

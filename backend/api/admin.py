@@ -692,3 +692,102 @@ async def clean_key_failures(request: Request):
     mgr = request.app.state.api_key_manager
     count = await mgr.failures.clear_all()
     return {"ok": True, "cleaned": count}
+
+# ============== 待审批账户管理 ==============
+
+@router.get("/pending-accounts", dependencies=[Depends(verify_admin)])
+async def list_pending_accounts(request: Request):
+    """获取所有待审批账户"""
+    from backend.core.pending_account_store import PendingAccountStore
+    
+    store: PendingAccountStore = request.app.state.pending_account_store
+    entries = store.get_all()
+    
+    # 返回列表，包含 id, email, submitted_by_api_key, created_at 等字段（不返回密码）
+    return {
+        "pending_accounts": [
+            {
+                "id": entry.id,
+                "email": entry.email,
+                "proxy": entry.proxy,
+                "cookies": entry.cookies,
+                "submitted_by_api_key": entry.submitted_by_api_key,
+                "created_at": entry.created_at,
+            }
+            for entry in entries
+        ]
+    }
+
+
+@router.post("/pending-accounts/{id}/approve", dependencies=[Depends(verify_admin)])
+async def approve_pending_account(id: str, request: Request):
+    """批准待审批账户"""
+    from backend.core.pending_account_store import PendingAccountStore
+    from backend.core.account_pool import Account, AccountPool
+    from backend.services.qwen_client import QwenClient
+    import logging
+    
+    log = logging.getLogger("backend.api.admin")
+    
+    store: PendingAccountStore = request.app.state.pending_account_store
+    pool: AccountPool = request.app.state.account_pool
+    client: QwenClient = request.app.state.qwen_client
+    
+    # a. 从 pending_account_store 获取待审批账户记录
+    entry = store.get_by_id(id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Pending account not found")
+    
+    # b. 使用 QwenClient 尝试登录该账户
+    ok, token, error = await client.auth_resolver.login(entry.email, entry.password, entry.proxy)
+    if not ok:
+        raise HTTPException(status_code=400, detail=f"登录失败: {error}")
+    
+    # c. 登录成功后，获取 token（已在上面获取）
+    
+    # d. 验证 token 有效性
+    is_valid = await client.verify_token(token)
+    if not is_valid:
+        raise HTTPException(status_code=400, detail="Token 验证失败")
+    
+    # e. 如果验证通过，创建 Account 对象并添加到正式账户池
+    acc = Account(
+        email=entry.email,
+        password=entry.password,
+        token=token,
+        cookies=entry.cookies or "",
+        proxy=entry.proxy or "",
+    )
+    await pool.add(acc)
+    
+    # 从待审批列表中移除
+    await store.delete(id)
+    
+    log.info(f"[审批] 已批准账户: {entry.email}")
+    
+    return {"ok": True, "message": f"账户 {entry.email} 已成功批准"}
+
+
+@router.post("/pending-accounts/{id}/reject", dependencies=[Depends(verify_admin)])
+async def reject_pending_account(id: str, request: Request):
+    """拒绝待审批账户"""
+    from backend.core.pending_account_store import PendingAccountStore
+    import logging
+    
+    log = logging.getLogger("backend.api.admin")
+    
+    store: PendingAccountStore = request.app.state.pending_account_store
+    
+    # a. 获取待审批账户记录
+    entry = store.get_by_id(id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Pending account not found")
+    
+    email = entry.email
+    
+    # b. 删除记录
+    await store.delete(id)
+    
+    log.info(f"[审批] 已拒绝账户: {email}")
+    
+    return {"ok": True, "message": f"账户 {email} 已拒绝"}
