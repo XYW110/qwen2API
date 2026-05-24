@@ -8,6 +8,7 @@ import {
   Menu,
   X,
   Image,
+  AlertTriangle,
 } from "lucide-react";
 import { useState } from "react";
 
@@ -19,6 +20,7 @@ export default function AdminLayout() {
     { name: "运行状态", path: "/", icon: LayoutDashboard },
     { name: "账号管理", path: "/accounts", icon: Activity },
     { name: "API Key", path: "/tokens", icon: Key },
+    { name: "失败记录", path: "/failures", icon: AlertTriangle },
     { name: "接口测试", path: "/test", icon: MessageSquare },
     { name: "图片生成", path: "/images", icon: Image },
     { name: "系统设置", path: "/settings", icon: Settings },

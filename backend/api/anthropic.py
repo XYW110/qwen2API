@@ -465,6 +465,7 @@ async def anthropic_messages(request: Request):
                     prompt=prompt,
                     users_db=users_db,
                     token=token,
+                    api_key_manager=getattr(app.state, "api_key_manager", None),
                     history_messages=history_messages,
                     max_attempts=request_max_attempts(standard_request),
                     allow_after_visible_output=True,

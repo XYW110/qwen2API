@@ -42,6 +42,19 @@ install_stack_dump_handler(
 )
 log = logging.getLogger("qwen2api")
 
+
+async def cleanup_loop(app):
+    """每24小时清理过期的API Key失败记录"""
+    while True:
+        await asyncio.sleep(86400)  # 24 hours
+        try:
+            manager = app.state.api_key_manager
+            cleaned_count = await manager.run_cleanup()
+            log.info("Expired API key failure records cleaned up: %d", cleaned_count)
+        except Exception as e:
+            log.error("Cleanup task failed: %s", e)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     with request_context(surface="startup"):
@@ -59,6 +72,12 @@ async def lifespan(app: FastAPI):
         stats_store = AccountStatsStore("data/account_stats.json")
         await stats_store.load()
         app.state.stats_store = stats_store
+        
+        # 初始化 API Key 管理器
+        from backend.core.api_key_store import ApiKeyManager
+        api_key_manager = ApiKeyManager()
+        await api_key_manager.load()
+        app.state.api_key_manager = api_key_manager
 
         # 初始化组件
         app.state.account_pool = AccountPool(
@@ -83,11 +102,22 @@ async def lifespan(app: FastAPI):
         await app.state.upstream_file_cache.load()
         asyncio.create_task(garbage_collect_chats(app))
         asyncio.create_task(context_cleanup_loop(app))
+        
+        # 启动 API Key 失败记录清理任务
+        cleanup_task = asyncio.create_task(cleanup_loop(app))
 
-    yield
+    try:
+        yield
+    finally:
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            pass
 
     with request_context(surface="shutdown"):
         log.info("正在关闭网关服务...")
+
 
 app = FastAPI(title="qwen2API Enterprise Gateway", version="2.0.0", lifespan=lifespan)
 

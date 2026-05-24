@@ -6,6 +6,7 @@ import AccountsPage from "./pages/AccountsPage"
 import AccountDetailPage from "./pages/AccountDetailPage"
 import TestPage from "./pages/TestPage"
 import TokensPage from "./pages/TokensPage"
+import FailuresPage from "./pages/FailuresPage"
 import SettingsPage from "./pages/SettingsPage"
 import ImagePage from "./pages/ImagePage"
 
@@ -20,6 +21,7 @@ function App() {
             <Route path="accounts" element={<AccountsPage />} />
             <Route path="accounts/:email" element={<AccountDetailPage />} />
             <Route path="tokens" element={<TokensPage />} />
+            <Route path="failures" element={<FailuresPage />} />
             <Route path="test" element={<TestPage />} />
             <Route path="images" element={<ImagePage />} />
             <Route path="settings" element={<SettingsPage />} />

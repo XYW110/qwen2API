@@ -5,7 +5,7 @@ import dataclasses
 from dataclasses import dataclass
 import logging
 import time
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, TYPE_CHECKING
 
 from backend.adapter.standard_request import StandardRequest
 from backend.runtime.execution import (
@@ -26,6 +26,9 @@ from backend.toolcall.runtime_tools import (
     parse_tool_call_arguments,
     tool_target_preview,
 )
+
+if TYPE_CHECKING:
+    from backend.core.api_key_store import ApiKeyManager
 
 log = logging.getLogger("qwen2api.completion_bridge")
 
@@ -168,7 +171,14 @@ async def _reacquire_bound_account_if_needed(*, client, standard_request: Standa
         standard_request.bound_account = None
 
 
-def _fire_and_forget_stats(client, execution, usage, model_name: str) -> None:
+def _fire_and_forget_stats(
+    client,
+    execution,
+    usage,
+    model_name: str,
+    api_key: str | None = None,
+    api_key_manager: "ApiKeyManager | None" = None,
+) -> None:
     """Async stats writing via stats_store; never blocks or raises."""
     try:
         stats_store = getattr(client.account_pool, 'stats_store', None)
@@ -192,8 +202,74 @@ def _fire_and_forget_stats(client, execution, usage, model_name: str) -> None:
             prompt_tokens=usage.get("prompt_tokens", 0),
             completion_tokens=usage.get("completion_tokens", 0),
         ))
+        
+        # API Key 使用量统计 (fire-and-forget)
+        if api_key and api_key_manager:
+            total_tokens = usage.get("total_tokens", 0)
+            asyncio.create_task(_record_api_key_usage(
+                api_key_manager=api_key_manager,
+                api_key=api_key,
+                model=model_name,
+                success=True,
+                tokens=total_tokens,
+            ))
     except Exception as e:
         log.warning("Failed to fire stats update: %s", e)
+
+
+async def _record_api_key_usage(
+    api_key_manager: "ApiKeyManager",
+    api_key: str,
+    model: str,
+    success: bool,
+    tokens: int,
+) -> None:
+    """异步记录 API Key 使用量（fire-and-forget）"""
+    try:
+        await api_key_manager.usage.record_usage(
+            api_key=api_key,
+            model=model,
+            success=success,
+            tokens=tokens,
+        )
+    except Exception as e:
+        log.warning("Failed to record API key usage: %s", e)
+
+
+async def _record_api_key_failure(
+    api_key_manager: "ApiKeyManager",
+    api_key: str,
+    account_email: str,
+    model: str,
+    error_message: str,
+) -> None:
+    """异步记录 API Key 失败（fire-and-forget）"""
+    try:
+        await api_key_manager.failures.record(
+            api_key=api_key,
+            account_email=account_email,
+            model=model,
+            error_message=error_message,
+        )
+    except Exception as e:
+        log.warning("Failed to record API key failure: %s", e)
+
+
+def _fire_and_forget_failure(
+    api_key_manager: "ApiKeyManager",
+    api_key: str,
+    account_email: str,
+    model: str,
+    error_message: str,
+) -> None:
+    """Fire-and-forget 失败记录"""
+    asyncio.create_task(_record_api_key_failure(
+        api_key_manager=api_key_manager,
+        api_key=api_key,
+        account_email=account_email,
+        model=model,
+        error_message=error_message,
+    ))
 
 
 async def run_completion_bridge(
@@ -206,6 +282,7 @@ async def run_completion_bridge(
     usage_delta: int | None = None,
     capture_events: bool = True,
     on_delta: Callable[[dict[str, Any], str | None, list[dict[str, Any]] | None], Awaitable[None]] | None = None,
+    api_key_manager: "ApiKeyManager | None" = None,
 ) -> CompletionBridgeResult:
     execution = await collect_completion_run(
         client,
@@ -226,7 +303,7 @@ async def run_completion_bridge(
         await add_used_tokens(users_db, token, usage_delta if usage_delta is not None else usage["total_tokens"])
         # Async stats write (non-blocking)
         model_name = getattr(standard_request, 'resolved_model', None) or getattr(standard_request, 'response_model', 'unknown')
-        _fire_and_forget_stats(client, execution, usage, model_name)
+        _fire_and_forget_stats(client, execution, usage, model_name, api_key=token, api_key_manager=api_key_manager)
         await cleanup_runtime_resources(
             client,
             execution.acc,
@@ -235,6 +312,20 @@ async def run_completion_bridge(
         )
         execution_cleaned = True
         return CompletionBridgeResult(execution=execution, usage=usage, prompt=prompt, attempt_index=0)
+    except Exception as e:
+        # 记录失败（fire-and-forget）
+        if api_key_manager and token:
+            model_name = getattr(standard_request, 'resolved_model', None) or getattr(standard_request, 'response_model', 'unknown')
+            account_email = getattr(standard_request, 'bound_account_email', None) or (execution.acc.email if execution.acc else None)
+            if account_email:
+                _fire_and_forget_failure(
+                    api_key_manager=api_key_manager,
+                    api_key=token,
+                    account_email=account_email,
+                    model=model_name,
+                    error_message=str(e),
+                )
+        raise
     finally:
         if not execution_cleaned:
             await cleanup_runtime_resources(
@@ -260,6 +351,7 @@ async def run_retryable_completion_bridge(
     on_delta: Callable[[dict[str, Any], str | None, list[dict[str, Any]] | None], Awaitable[None]] | None = None,
     on_attempt_start: Callable[[int, str], Awaitable[None]] | None = None,
     on_retry: Callable[[int, RuntimeRetryDirective, Any], Awaitable[None]] | None = None,
+    api_key_manager: "ApiKeyManager | None" = None,
 ) -> CompletionBridgeResult:
     current_prompt = prompt
     if not getattr(standard_request, 'full_prompt', None):
@@ -321,7 +413,7 @@ async def run_retryable_completion_bridge(
             await add_used_tokens(users_db, token, usage_delta)
             # Async stats write (non-blocking)
             model_name = getattr(standard_request, 'resolved_model', None) or getattr(standard_request, 'response_model', 'unknown')
-            _fire_and_forget_stats(client, execution, usage, model_name)
+            _fire_and_forget_stats(client, execution, usage, model_name, api_key=token, api_key_manager=api_key_manager)
             await cleanup_runtime_resources(
                 client,
                 execution.acc,
@@ -336,6 +428,20 @@ async def run_retryable_completion_bridge(
                 attempt_index=attempt_index,
                 directive=directive,
             )
+        except Exception as e:
+            # 记录失败（fire-and-forget）
+            if api_key_manager and token:
+                model_name = getattr(standard_request, 'resolved_model', None) or getattr(standard_request, 'response_model', 'unknown')
+                account_email = getattr(standard_request, 'bound_account_email', None) or (execution.acc.email if execution.acc else None)
+                if account_email:
+                    _fire_and_forget_failure(
+                        api_key_manager=api_key_manager,
+                        api_key=token,
+                        account_email=account_email,
+                        model=model_name,
+                        error_message=str(e),
+                    )
+            raise
         finally:
             if not execution_cleaned:
                 await cleanup_runtime_resources(

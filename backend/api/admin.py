@@ -5,6 +5,7 @@ from backend.core.database import AsyncJsonDB
 from backend.core.account_pool import AccountPool, Account
 import secrets
 import re
+from typing import Optional
 
 # 代理 URL 校验正则
 _PROXY_URL_RE = re.compile(r"^(https?|socks5)://\S+$", re.IGNORECASE)
@@ -96,6 +97,12 @@ class User(BaseModel):
     name: str
     quota: int
     used_tokens: int
+
+class CreateKeyRequest(BaseModel):
+    note: Optional[str] = None
+
+class UpdateKeyNoteRequest(BaseModel):
+    note: Optional[str] = None
 
 @router.get("/status", dependencies=[Depends(verify_admin)])
 async def get_system_status(request: Request):
@@ -625,24 +632,63 @@ async def update_settings(data: dict):
     return {"ok": True}
 
 @router.get("/keys", dependencies=[Depends(verify_admin)])
-async def get_keys():
-    from backend.core.config import API_KEYS
-    return {"keys": list(API_KEYS)}
+async def get_keys(request: Request):
+    mgr = request.app.state.api_key_manager
+    entries = mgr.keys.get_all()
+    return {
+        "keys": [
+            {
+                "key": e.key,
+                "note": e.note,
+                "created_at": e.created_at,
+            }
+            for e in entries
+        ]
+    }
 
 @router.post("/keys", dependencies=[Depends(verify_admin)])
-async def create_key():
-    from backend.core.config import API_KEYS, save_api_keys
+async def create_key(request: Request, body: CreateKeyRequest = None):
+    mgr = request.app.state.api_key_manager
 
     new_key = f"sk-{secrets.token_hex(24)}"
-    API_KEYS.add(new_key)
-    save_api_keys(API_KEYS)
-    return {"ok": True, "key": new_key}
+    note = body.note if body else None
+    entry = await mgr.keys.create(new_key, note=note)
+    return {"ok": True, "key": entry.key, "note": entry.note, "created_at": entry.created_at}
+
+@router.patch("/keys/{key}/note", dependencies=[Depends(verify_admin)])
+async def update_key_note(key: str, body: UpdateKeyNoteRequest, request: Request):
+    mgr = request.app.state.api_key_manager
+    entry = await mgr.keys.update_note(key, body.note)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="API Key not found")
+    return {"ok": True, "key": entry.key, "note": entry.note}
 
 @router.delete("/keys/{key}", dependencies=[Depends(verify_admin)])
-async def delete_key(key: str):
-    from backend.core.config import API_KEYS, save_api_keys
+async def delete_key(key: str, request: Request):
+    mgr = request.app.state.api_key_manager
+    success = await mgr.delete_key(key)
+    return {"ok": success}
 
-    if key in API_KEYS:
-        API_KEYS.remove(key)
-        save_api_keys(API_KEYS)
-    return {"ok": True}
+@router.get("/keys/stats", dependencies=[Depends(verify_admin)])
+async def get_key_stats(request: Request):
+    mgr = request.app.state.api_key_manager
+    entries = mgr.usage.get_all()
+    return {"stats": [e.model_dump() for e in entries]}
+
+@router.get("/keys/stats/{key}", dependencies=[Depends(verify_admin)])
+async def get_key_stats_detail(key: str, request: Request):
+    mgr = request.app.state.api_key_manager
+    entries = mgr.usage.get_by_api_key(key)
+    return {"stats": [e.model_dump() for e in entries]}
+
+@router.get("/keys/failures", dependencies=[Depends(verify_admin)])
+async def get_key_failures(request: Request):
+    mgr = request.app.state.api_key_manager
+    entries = mgr.failures.get_all()
+    return {"failures": [e.model_dump() for e in entries]}
+
+@router.post("/keys/failures/clean", dependencies=[Depends(verify_admin)])
+async def clean_key_failures(request: Request):
+    mgr = request.app.state.api_key_manager
+    count = await mgr.failures.clear_all()
+    return {"ok": True, "cleaned": count}

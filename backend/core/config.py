@@ -2,7 +2,7 @@ import os
 import json
 from pathlib import Path
 from pydantic_settings import BaseSettings
-from typing import Dict, Set
+from typing import Dict, Set, Optional
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 DATA_DIR = BASE_DIR / "data"
@@ -71,24 +71,60 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
 
+# ============== API Keys 兼容层 ==============
+# 旧代码通过 from backend.core.config import API_KEYS 使用 set[str]
+# 新版本使用 ApiKeyManager，但保留兼容性包装
+
 API_KEYS_FILE = DATA_DIR / "api_keys.json"
 
+# 延迟导入避免循环依赖
+_api_key_manager_instance = None
+
+def _get_api_key_manager():
+    global _api_key_manager_instance
+    if _api_key_manager_instance is None:
+        from backend.core.api_key_store import ApiKeyManager
+        _api_key_manager_instance = ApiKeyManager()
+    return _api_key_manager_instance
+
 def load_api_keys() -> set:
-    if API_KEYS_FILE.exists():
+    """兼容旧接口：返回 set[str]"""
+    try:
+        mgr = _get_api_key_manager()
+        # 同步加载（仅首次调用时有效）
+        import asyncio
         try:
-            with open(API_KEYS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return set(data.get("keys", []))
-        except Exception:
+            loop = asyncio.get_running_loop()
+            if not loop.is_running():
+                loop.run_until_complete(mgr.load())
+        except RuntimeError:
             pass
+        entries = mgr.keys.get_all()
+        return {e.key for e in entries}
+    except Exception:
+        pass
     return set()
 
 def save_api_keys(keys: set):
-    API_KEYS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(API_KEYS_FILE, "w", encoding="utf-8") as f:
-        json.dump({"keys": list(keys)}, f, indent=2)
+    """兼容旧接口：将 set[str] 写入文件"""
+    try:
+        mgr = _get_api_key_manager()
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+            if not loop.is_running():
+                # 同步写入（仅首次调用时有效）
+                loop.run_until_complete(mgr.load())
+        except RuntimeError:
+            pass
+        # 直接写旧格式文件（兼容）
+        API_KEYS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(API_KEYS_FILE, "w", encoding="utf-8") as f:
+            json.dump({"keys": list(keys)}, f, indent=2)
+    except Exception:
+        pass
 
-# 在内存中存储管理的 API Keys
+# 兼容性：在内存中存储管理的 API Keys（旧代码使用）
 API_KEYS = load_api_keys()
 
 VERSION = "2.0.0"
