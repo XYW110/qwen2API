@@ -12,6 +12,7 @@ def anthropic_message_start(msg_id: str, model_name: str, usage: dict[str, Any])
             "content": [],
             "model": model_name,
             "stop_reason": None,
+            "stop_sequence": None,
             "usage": usage,
         },
     }

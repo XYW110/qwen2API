@@ -175,13 +175,9 @@ def _message_start_event(msg_id: str, model_name: str, prompt: str, answer_text:
     return stream_presenter.anthropic_message_start(msg_id, model_name, _anthropic_usage(prompt, answer_text, extra_prompt_tokens=extra_prompt_tokens))
 
 
-def _visible_answer_text_length(*, directive, execution, stream_state: _AnthropicStreamState | None = None) -> int:
+def _visible_answer_text_length(*, directive, execution, stream_state: object | None = None) -> int:
     if directive.stop_reason == "tool_use":
         return 0
-    if stream_state is not None:
-        buffered_text = "".join(text_chunk for _, text_chunk in stream_state.answer_text_buffer)
-        if buffered_text:
-            return count_tokens(buffered_text)
     return count_tokens(execution.state.answer_text)
 
 
@@ -294,158 +290,224 @@ async def anthropic_messages(request: Request):
 
         if req_data.get("stream", False):
             async def generate():
-                async with app.state.session_locks.hold(session_key):
-                    standard_request, effective_payload, model_name, qwen_model, prompt, msg_id = await prepare_locked_request(req_data)
-                    update_request_context(requested_model=model_name, resolved_model=qwen_model)
-                    log.info(f"[ANT] model={qwen_model}, stream={standard_request.stream}, tool_enabled={standard_request.tool_enabled}, tools={[t.get('name') for t in standard_request.tools]}, prompt_len={len(prompt)}")
-                    history_messages = original_history_messages
-                    current_prompt = prompt
-                    max_attempts = request_max_attempts(standard_request)
-                    for stream_attempt in range(max_attempts):
-                        stream_state = _AnthropicStreamState(
-                            msg_id=msg_id,
-                            model_name=model_name,
-                            prompt=current_prompt,
-                            extra_prompt_tokens=standard_request.context_attachment_tokens,
-                        )
-                        try:
-                            update_request_context(stream_attempt=stream_attempt + 1)
+                queue: asyncio.Queue[str | None] = asyncio.Queue()
 
-                            async def on_delta(evt: dict[str, Any], text_chunk: str | None, _: list[dict[str, Any]] | None) -> None:
-                                stream_state.ensure_message_start()
-                                phase = evt.get("phase")
-                                if text_chunk and phase in ("think", "thinking_summary"):
-                                    stream_state.append_thinking_delta(text_chunk)
-                                    return
-                                if text_chunk and phase == "answer":
-                                    stream_state.buffer_answer_text(text_chunk)
-                                    return
-                                if phase == "tool_call":
-                                    extra = evt.get("extra", {}) or {}
-                                    tool_call_id = extra.get("tool_call_id")
-                                    if tool_call_id is None:
-                                        tool_call_id = f"tc_idx_{extra.get('index', 0)}"
-                                    tool_name = extra.get("tool_name")
-                                    if not tool_name:
-                                        return
-                                    stream_state.append_tool_delta(
-                                        tool_call_id=str(tool_call_id),
-                                        tool_name=_client_visible_tool_name(str(tool_name), standard_request.tool_catalog),
-                                        partial_json=evt.get("content", ""),
+                # Mutable state for SSE block tracking across on_delta calls
+                sse_state = {
+                    "started": False,
+                    "block_type": None,
+                    "block_index": -1,
+                    "opened_tool_ids": set(),
+                    "msg_id": None,
+                    "model_name": None,
+                    "current_prompt": None,
+                    "standard_request": None,
+                }
+
+                async def on_delta(evt: dict[str, Any], text_chunk: str | None, _: list[dict[str, Any]] | None) -> None:
+                    phase = evt.get("phase")
+
+                    # Send message_start on first event
+                    if not sse_state["started"]:
+                        await queue.put(stream_presenter.anthropic_message_start(
+                            sse_state["msg_id"], sse_state["model_name"],
+                            _anthropic_usage(sse_state["current_prompt"], "", extra_prompt_tokens=sse_state["standard_request"].context_attachment_tokens),
+                        ))
+                        sse_state["started"] = True
+
+                    # Handle thinking blocks
+                    if text_chunk and phase in ("think", "thinking_summary"):
+                        if sse_state["block_type"] != "thinking":
+                            if sse_state["block_type"] is not None:
+                                await queue.put(stream_presenter.anthropic_content_block_stop(sse_state["block_index"]))
+                            sse_state["block_type"] = "thinking"
+                            sse_state["block_index"] += 1
+                            await queue.put(stream_presenter.anthropic_content_block_start(
+                                sse_state["block_index"], {"type": "thinking", "thinking": ""},
+                            ))
+                        await queue.put(stream_presenter.anthropic_content_block_delta(
+                            sse_state["block_index"], {"type": "thinking_delta", "thinking": text_chunk},
+                        ))
+                        return
+
+                    # Handle answer text (REAL-TIME streaming!)
+                    if text_chunk and phase == "answer":
+                        if sse_state["block_type"] != "text":
+                            if sse_state["block_type"] is not None:
+                                await queue.put(stream_presenter.anthropic_content_block_stop(sse_state["block_index"]))
+                            sse_state["block_type"] = "text"
+                            sse_state["block_index"] += 1
+                            await queue.put(stream_presenter.anthropic_content_block_start(
+                                sse_state["block_index"], {"type": "text", "text": ""},
+                            ))
+                        await queue.put(stream_presenter.anthropic_content_block_delta(
+                            sse_state["block_index"], {"type": "text_delta", "text": text_chunk},
+                        ))
+                        return
+
+                    # Handle tool_call blocks
+                    if phase == "tool_call":
+                        extra = evt.get("extra", {}) or {}
+                        tool_call_id = extra.get("tool_call_id")
+                        if tool_call_id is None:
+                            tool_call_id = f"tc_idx_{extra.get('index', 0)}"
+                        tool_name = extra.get("tool_name")
+                        if not tool_name:
+                            return
+                        visible_name = _client_visible_tool_name(str(tool_name), sse_state["standard_request"].tool_catalog)
+                        tc_id_str = str(tool_call_id)
+
+                        if sse_state["block_type"] != "tool_use" or tc_id_str not in sse_state["opened_tool_ids"]:
+                            if sse_state["block_type"] is not None:
+                                await queue.put(stream_presenter.anthropic_content_block_stop(sse_state["block_index"]))
+                            sse_state["block_type"] = "tool_use"
+                            sse_state["block_index"] += 1
+                            await queue.put(
+                                f"event: content_block_start\n"
+                                f"data: {json.dumps({'type': 'content_block_start', 'index': sse_state['block_index'], 'content_block': {'type': 'tool_use', 'id': tc_id_str, 'name': visible_name, 'input': {}}}, ensure_ascii=False)}\n\n"
+                            )
+                            sse_state["opened_tool_ids"].add(tc_id_str)
+
+                        partial = evt.get("content", "")
+                        if partial:
+                            await queue.put(stream_presenter.anthropic_content_block_delta(
+                                sse_state["block_index"], {"type": "input_json_delta", "partial_json": partial},
+                            ))
+                        return
+
+                async def runner():
+                    try:
+                        async with app.state.session_locks.hold(session_key):
+                            standard_request, effective_payload, model_name, qwen_model, prompt, msg_id = await prepare_locked_request(req_data)
+                            # Set shared state for on_delta
+                            sse_state["standard_request"] = standard_request
+                            sse_state["model_name"] = model_name
+                            sse_state["msg_id"] = msg_id
+                            sse_state["current_prompt"] = prompt
+                            update_request_context(requested_model=model_name, resolved_model=qwen_model)
+                            log.info(f"[ANT] model={qwen_model}, stream={standard_request.stream}, tool_enabled={standard_request.tool_enabled}, tools={[t.get('name') for t in standard_request.tools]}, prompt_len={len(prompt)}")
+                            current_prompt = prompt
+                            max_attempts = request_max_attempts(standard_request)
+
+                            for stream_attempt in range(max_attempts):
+                                update_request_context(stream_attempt=stream_attempt + 1)
+
+                                # Reset SSE state for each attempt
+                                sse_state["started"] = False
+                                sse_state["block_type"] = None
+                                sse_state["block_index"] = -1
+                                sse_state["opened_tool_ids"] = set()
+
+                                execution = await collect_completion_run(
+                                    client, standard_request, current_prompt,
+                                    capture_events=False, on_delta=on_delta,
+                                )
+
+                                retry = evaluate_retry_directive(
+                                    request=standard_request, current_prompt=current_prompt,
+                                    history_messages=history_messages, attempt_index=stream_attempt,
+                                    max_attempts=max_attempts, state=execution.state,
+                                    allow_after_visible_output=True,
+                                )
+                                if retry.retry:
+                                    reused_persistent_chat = bool(standard_request.persistent_session and standard_request.upstream_chat_id)
+                                    preserve_chat = reused_persistent_chat
+                                    await cleanup_runtime_resources(client, execution.acc, execution.chat_id, preserve_chat=preserve_chat)
+                                    if reused_persistent_chat:
+                                        next_prompt = build_retry_rebase_prompt(standard_request, reason=retry.reason)
+                                    else:
+                                        next_prompt = retry.next_prompt
+                                    await _reacquire_bound_account_if_needed(client=client, standard_request=standard_request)
+                                    # Restart the loop with new prompt
+                                    current_prompt = next_prompt
+                                    sse_state["current_prompt"] = next_prompt
+                                    continue
+
+                                # Close last open content block
+                                if sse_state["block_type"] is not None:
+                                    await queue.put(stream_presenter.anthropic_content_block_stop(sse_state["block_index"]))
+
+                                # Build directive and handle post-completion tool blocks
+                                directive = build_tool_directive(standard_request, execution.state)
+                                expected_tool_ids = {
+                                    block.get("id") for block in directive.tool_blocks
+                                    if block.get("type") == "tool_use" and block.get("id")
+                                }
+                                for block in directive.tool_blocks:
+                                    if block.get("type") != "tool_use":
+                                        continue
+                                    tool_id = block.get("id")
+                                    if tool_id in sse_state["opened_tool_ids"]:
+                                        continue
+                                    sse_state["block_index"] += 1
+                                    visible_name = _client_visible_tool_name(str(block.get("name", "")), standard_request.tool_catalog)
+                                    await queue.put(
+                                        f"event: content_block_start\n"
+                                        f"data: {json.dumps({'type': 'content_block_start', 'index': sse_state['block_index'], 'content_block': {'type': 'tool_use', 'id': str(tool_id), 'name': visible_name, 'input': {}}}, ensure_ascii=False)}\n\n"
                                     )
+                                    await queue.put(stream_presenter.anthropic_content_block_delta(
+                                        sse_state["block_index"],
+                                        {"type": "input_json_delta", "partial_json": json.dumps(block.get("input", {}), ensure_ascii=False)},
+                                    ))
+                                    await queue.put(stream_presenter.anthropic_content_block_stop(sse_state["block_index"]))
+                                    sse_state["opened_tool_ids"].add(str(tool_id))
 
-                            execution = await collect_completion_run(
-                                client,
-                                standard_request,
-                                current_prompt,
-                                capture_events=False,
-                                on_delta=on_delta,
-                            )
-                            retry = evaluate_retry_directive(
-                                request=standard_request,
-                                current_prompt=current_prompt,
-                                history_messages=history_messages,
-                                attempt_index=stream_attempt,
-                                max_attempts=max_attempts,
-                                state=execution.state,
-                                allow_after_visible_output=True,
-                            )
-                            if retry.retry:
-                                reused_persistent_chat = bool(standard_request.persistent_session and standard_request.upstream_chat_id)
-                                # 如果正在复用会话，重试时保留会话，避免删除后重建导致上下文丢失
-                                preserve_chat = reused_persistent_chat
-                                await cleanup_runtime_resources(client, execution.acc, execution.chat_id, preserve_chat=preserve_chat)
-                                if reused_persistent_chat:
-                                    # 保留 upstream_chat_id，在同一会话中重试
-                                    # standard_request.session_chat_invalidated = True
-                                    # standard_request.upstream_chat_id = None
-                                    current_prompt = build_retry_rebase_prompt(standard_request, reason=retry.reason)
-                                else:
-                                    current_prompt = retry.next_prompt
-                                await _reacquire_bound_account_if_needed(client=client, standard_request=standard_request)
-                                continue
+                                # Send message_delta and message_stop
+                                visible_answer_length = _visible_answer_text_length(
+                                    directive=directive, execution=execution,
+                                )
+                                stop_reason = "tool_use" if expected_tool_ids else "end_turn"
+                                await queue.put(stream_presenter.anthropic_message_delta(stop_reason, visible_answer_length))
+                                await queue.put(stream_presenter.anthropic_message_stop())
 
-                            if not stream_state.pending_chunks:
-                                stream_state.pending_chunks.append(_message_start_event(
-                                    msg_id,
-                                    model_name,
-                                    current_prompt,
-                                    execution.state.answer_text,
+                                # Post-processing: stats, persistence, cleanup
+                                await _add_used_tokens_for_prompt(
+                                    users_db=users_db, token=token,
+                                    prompt_text=current_prompt,
+                                    answer_text_length=count_tokens(execution.state.answer_text),
                                     extra_prompt_tokens=standard_request.context_attachment_tokens,
-                                ))
-
-                            stream_state.close_current_block()
-                            directive = build_tool_directive(standard_request, execution.state)
-                            if directive.stop_reason == "tool_use":
-                                stream_state.clear_answer_text()
-                                stream_state.current_block = {"type": None, "index": None, "tool_call_id": None}
-                            else:
-                                stream_state.flush_answer_text()
-                            expected_tool_ids = {
-                                block.get("id")
-                                for block in directive.tool_blocks
-                                if block.get("type") == "tool_use" and block.get("id")
-                            }
-                            for block in directive.tool_blocks:
-                                if block.get("type") != "tool_use":
-                                    continue
-                                tool_id = block.get("id")
-                                if tool_id in stream_state.opened_tool_calls:
-                                    continue
-                                index = stream_state.open_tool_block(
-                                    str(tool_id),
-                                    _client_visible_tool_name(str(block.get("name", "")), standard_request.tool_catalog),
                                 )
-                                stream_state.pending_chunks.append(
-                                    stream_presenter.anthropic_content_block_delta(index, {'type': 'input_json_delta', 'partial_json': json.dumps(block.get('input', {}), ensure_ascii=False)})
+                                _usage = calculate_usage(
+                                    current_prompt, execution.state.answer_text,
+                                    getattr(execution.state, "tool_calls", []),
+                                    extra_prompt_tokens=getattr(standard_request, "context_attachment_tokens", 0),
                                 )
-                                stream_state.close_current_block()
+                                _model_name_resolved = getattr(standard_request, "resolved_model", None) or getattr(standard_request, "response_model", "unknown")
+                                _fire_and_forget_stats(client, execution, _usage, _model_name_resolved, api_key=token, api_key_manager=getattr(app.state, "api_key_manager", None))
+                                assistant_message = build_anthropic_assistant_history_message(
+                                    execution=execution, request=standard_request, directive=directive,
+                                )
+                                await persist_session_turn(
+                                    app=app, request=standard_request, surface="anthropic",
+                                    execution=execution, assistant_message=assistant_message,
+                                )
+                                await cleanup_runtime_resources(
+                                    client, execution.acc, execution.chat_id,
+                                    preserve_chat=bool(standard_request.persistent_session),
+                                )
+                                return
+                    except HTTPException as he:
+                        await clear_invalidated_session_chat(app=app, request=standard_request)
+                        await queue.put(
+                            f"event: error\n"
+                            f"data: {json.dumps({'type': 'error', 'error': {'type': 'api_error', 'message': he.detail}}, ensure_ascii=False)}\n\n"
+                        )
+                    except Exception as e:
+                        await clear_invalidated_session_chat(app=app, request=standard_request)
+                        await queue.put(
+                            f"event: error\n"
+                            f"data: {json.dumps({'type': 'error', 'error': {'type': 'api_error', 'message': str(e)}}, ensure_ascii=False)}\n\n"
+                        )
+                    finally:
+                        await queue.put(None)
 
-                            visible_answer_length = _visible_answer_text_length(
-                                directive=directive,
-                                execution=execution,
-                                stream_state=stream_state,
-                            )
-                            stop_reason = "tool_use" if expected_tool_ids else "end_turn"
-                            stream_state.pending_chunks.append(stream_presenter.anthropic_message_delta(stop_reason, visible_answer_length))
-                            stream_state.pending_chunks.append(stream_presenter.anthropic_message_stop())
-
-                            await _add_used_tokens_for_prompt(
-                                users_db=users_db,
-                                token=token,
-                                prompt_text=current_prompt,
-                                answer_text_length=count_tokens(execution.state.answer_text),
-                                extra_prompt_tokens=standard_request.context_attachment_tokens,
-                            )
-                            assistant_message = build_anthropic_assistant_history_message(
-                                execution=execution,
-                                request=standard_request,
-                                directive=directive,
-                            )
-                            await persist_session_turn(
-                                app=app,
-                                request=standard_request,
-                                surface="anthropic",
-                                execution=execution,
-                                assistant_message=assistant_message,
-                            )
-                            await cleanup_runtime_resources(
-                                client,
-                                execution.acc,
-                                execution.chat_id,
-                                preserve_chat=bool(standard_request.persistent_session),
-                            )
-                            for chunk in stream_state.pending_chunks:
-                                yield chunk
-                            return
-                        except HTTPException as he:
-                            await clear_invalidated_session_chat(app=app, request=standard_request)
-                            yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'type': 'api_error', 'message': he.detail}}, ensure_ascii=False)}\n\n"
-                            return
-                        except Exception as e:
-                            await clear_invalidated_session_chat(app=app, request=standard_request)
-                            yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'type': 'api_error', 'message': str(e)}}, ensure_ascii=False)}\n\n"
-                            return
+                task = asyncio.create_task(runner())
+                while True:
+                    chunk = await queue.get()
+                    if chunk is None:
+                        break
+                    yield chunk
+                await task
 
             return StreamingResponse(
                 generate(),
