@@ -67,6 +67,20 @@ def gemini_text_chunk(text: str) -> str:
     }
     return json.dumps(payload, ensure_ascii=False) + "\n"
 
+def gemini_sse_chunk(text: str) -> str:
+    """Return Gemini chunk in SSE format (for ?alt=sse)."""
+    payload = {
+        "candidates": [
+            {
+                "content": {
+                    "parts": [{"text": text}],
+                    "role": "model",
+                }
+            }
+        ]
+    }
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
 
 def gemini_error_chunk(message: str) -> str:
     return json.dumps({"error": message}, ensure_ascii=False) + "\n"

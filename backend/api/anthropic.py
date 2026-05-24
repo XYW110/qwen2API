@@ -25,7 +25,7 @@ from backend.services.client_profiles import CLAUDE_CODE_OPENAI_PROFILE
 from backend.toolcore.prompt_builder import messages_to_prompt
 from backend.services.response_formatters import _client_visible_tool_name, build_anthropic_message_payload
 from backend.services.qwen_client import QwenClient
-from backend.services.token_calc import count_tokens
+from backend.services.token_calc import calculate_usage, count_tokens
 from backend.adapter.standard_request import normalize_tool_choice
 from backend.toolcore.request_normalizer import normalize_anthropic_request, to_prompt_payload
 from backend.toolcore.task_session import (
@@ -36,7 +36,7 @@ from backend.toolcore.task_session import (
     persist_session_turn,
     plan_persistent_session_turn,
 )
-from backend.services.completion_bridge import run_retryable_completion_bridge
+from backend.services.completion_bridge import _fire_and_forget_stats, run_retryable_completion_bridge
 from backend.toolcall.normalize import build_tool_name_registry
 
 log = logging.getLogger("qwen2api.anthropic")

@@ -24,6 +24,11 @@ def extract_api_token(request: Request) -> str:
     if token:
         return token
 
+    # Support x-goog-api-key header for Gemini client compatibility
+    token = request.headers.get("x-goog-api-key", "").strip()
+    if token:
+        return token
+
     return request.query_params.get("key", "").strip() or request.query_params.get("api_key", "").strip()
 
 

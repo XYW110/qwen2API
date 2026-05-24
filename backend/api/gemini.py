@@ -17,6 +17,7 @@ log = logging.getLogger("qwen2api.gemini")
 router = APIRouter()
 
 GEMINI_STREAM_MEDIA_TYPE = "application/json"
+GEMINI_SSE_MEDIA_TYPE = "text/event-stream"
 
 
 def _gemini_to_chat_payload(model: str, body: dict[str, Any], *, force_stream: bool | None = None) -> dict[str, Any]:
@@ -148,14 +149,19 @@ async def gemini_stream_generate_content(model: str, request: Request):
     with request_context(req_id=new_request_id(), surface="gemini", requested_model=model):
         users_db, client, token, standard_request = await _load_and_validate_request(request, model, force_stream=True)
         content = standard_request.prompt
-        log.info(f"[Gemini] route=streamGenerateContent model={standard_request.resolved_model}, stream={standard_request.stream}, prompt_len={len(content)}")
+        
+        # Detect SSE format request
+        alt_sse = request.query_params.get("alt") == "sse"
+        media_type = GEMINI_SSE_MEDIA_TYPE if alt_sse else GEMINI_STREAM_MEDIA_TYPE
+        chunk_formatter = stream_presenter.gemini_sse_chunk if alt_sse else stream_presenter.gemini_text_chunk
+        log.info(f"[Gemini] route=streamGenerateContent model={standard_request.resolved_model}, stream={standard_request.stream}, prompt_len={len(content)}, format={'sse' if alt_sse else 'jsonl'}")
 
         async def generate():
             queue: asyncio.Queue[str | None] = asyncio.Queue()
 
             async def on_delta(evt, text_chunk, _):
                 if text_chunk and evt.get("phase") == "answer":
-                    await queue.put(stream_presenter.gemini_text_chunk(text_chunk))
+                    await queue.put(chunk_formatter(text_chunk))
 
             async def runner():
                 try:
@@ -165,7 +171,7 @@ async def gemini_stream_generate_content(model: str, request: Request):
                         prompt=content,
                         users_db=users_db,
                         token=token,
-                api_key_manager=getattr(request.app.state, "api_key_manager", None),
+                        api_key_manager=getattr(request.app.state, "api_key_manager", None),
                         history_messages=standard_request.tools and [] or [],
                         max_attempts=2 if standard_request.tools else 3,
                         allow_after_visible_output=True,
@@ -186,4 +192,4 @@ async def gemini_stream_generate_content(model: str, request: Request):
                 yield chunk
             await task
 
-        return StreamingResponse(generate(), media_type=GEMINI_STREAM_MEDIA_TYPE)
+        return StreamingResponse(generate(), media_type=media_type)
