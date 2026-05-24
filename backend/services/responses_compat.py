@@ -292,6 +292,13 @@ class ResponsesStreamTranslator:
         chunks = list(self.pending_chunks)
         answer_text = sanitize_visible_answer_text(execution.state.answer_text or "", tool_use=directive.stop_reason == "tool_use")
 
+        # Sync the payload message item id with the streaming text_item_id to avoid
+        # client-side "text part not found" errors.  The streaming SSE events already
+        # used self.text_item_id, so the payload must match – not the other way around.
+        first_message_item = next((o for o in response_payload.get("output", []) if o.get("type") == "message"), None)
+        if first_message_item is not None:
+            first_message_item["id"] = self.text_item_id
+
         if directive.stop_reason == "tool_use":
             output_index = 0
             if answer_text:
@@ -319,45 +326,45 @@ class ResponsesStreamTranslator:
                             }
                         )
                     )
-                chunks.append(
-                    sse_event(
-                        {
-                            "type": "response.output_text.done",
-                            "sequence_number": self._next_sequence(),
-                            "item_id": self.text_item_id,
-                            "output_index": output_index,
-                            "content_index": 0,
-                            "text": answer_text,
-                        }
-                    )
-                )
-                chunks.append(
-                    sse_event(
-                        {
-                            "type": "response.content_part.done",
-                            "sequence_number": self._next_sequence(),
-                            "item_id": self.text_item_id,
-                            "output_index": output_index,
-                            "content_index": 0,
-                            "part": {
-                                "type": "output_text",
+                    chunks.append(
+                        sse_event(
+                            {
+                                "type": "response.output_text.done",
+                                "sequence_number": self._next_sequence(),
+                                "item_id": self.text_item_id,
+                                "output_index": output_index,
+                                "content_index": 0,
                                 "text": answer_text,
-                                "annotations": [],
-                            },
-                        }
+                            }
+                        )
                     )
-                )
-                chunks.append(
-                    sse_event(
-                        {
-                            "type": "response.output_item.done",
-                            "sequence_number": self._next_sequence(),
-                            "output_index": output_index,
-                            "item": response_payload["output"][0],
-                        }
+                    chunks.append(
+                        sse_event(
+                            {
+                                "type": "response.content_part.done",
+                                "sequence_number": self._next_sequence(),
+                                "item_id": self.text_item_id,
+                                "output_index": output_index,
+                                "content_index": 0,
+                                "part": {
+                                    "type": "output_text",
+                                    "text": answer_text,
+                                    "annotations": [],
+                                },
+                            }
+                        )
                     )
-                )
-                output_index += 1
+                    chunks.append(
+                        sse_event(
+                            {
+                                "type": "response.output_item.done",
+                                "sequence_number": self._next_sequence(),
+                                "output_index": output_index,
+                                "item": response_payload["output"][0],
+                            }
+                        )
+                    )
+                    output_index += 1
 
             tool_items = [item for item in response_payload["output"] if item.get("type") == "function_call" and item.get("id") not in self.streamed_tool_item_ids]
             for tool_item in tool_items:

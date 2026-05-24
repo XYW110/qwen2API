@@ -511,7 +511,13 @@ async def collect_completion_run(
         # 第一重：刷新 Tool Sieve
         if tool_sieve and not native_tool_calls:
             flush_events = tool_sieve.flush()
+            # Ensure flush_events is a list to prevent NoneType errors
+            if flush_events is None:
+                flush_events = []
             for evt in flush_events:
+                # Skip non-dict or None events to prevent AttributeError
+                if not isinstance(evt, dict):
+                    continue
                 if evt.get("type") == "tool_calls":
                     calls = evt.get("calls", [])
                     if calls:
@@ -527,7 +533,7 @@ async def collect_completion_run(
                         final_finish_reason = "tool_calls"
                         log.info(
                             "[Collect] ✓ Tool Sieve 刷新检测到工具调用: tools=%s",
-                            [t.get("name") for t in detected_tool_calls],
+                            [t.get("name") for t in detected_tool_calls if t is not None],
                         )
                         break
                 elif evt.get("type") == "content":
@@ -554,7 +560,7 @@ async def collect_completion_run(
 
                 log.info(
                     "[Collect] ✓ 最终文本解析检测到工具调用: tools=%s, cleaned_text_len=%s",
-                    [t.get("name") for t in detected_tool_calls],
+                    [t.get("name") for t in detected_tool_calls if t is not None],
                     len(answer_text),
                 )
 
@@ -652,6 +658,9 @@ async def collect_completion_run(
             if tool_sieve:
                 sieve_started = time.perf_counter()
                 sieve_events = tool_sieve.process_chunk(content)
+                # Ensure sieve_events is a list to prevent NoneType errors
+                if sieve_events is None:
+                    sieve_events = []
                 sieve_elapsed = time.perf_counter() - sieve_started
                 if sieve_elapsed > 0.05:
                     log.warning(
@@ -664,6 +673,9 @@ async def collect_completion_run(
                         getattr(tool_sieve, "capturing", False),
                     )
                 for sieve_evt in sieve_events:
+                    # Skip non-dict or None events to prevent AttributeError
+                    if not isinstance(sieve_evt, dict):
+                        continue
                     if sieve_evt.get("type") == "tool_calls":
                         # 检测到工具调用！
                         calls = sieve_evt.get("calls", [])
@@ -678,12 +690,55 @@ async def collect_completion_run(
                             native_tool_calls.extend(detected_calls)
                             log.info(
                                 "[Collect] ✓ Tool Sieve 实时检测到工具调用: tools=%s",
-                                [c.get("name") for c in detected_calls],
+                                [c.get("name") for c in detected_calls if c is not None],
                             )
                             return _finalize_result(reason="tool_sieve_detected")
 
+            # Use sieve-filtered safe text for on_delta to prevent DSML markup leakage.
+            # The sieve buffers tool markup and only emits safe content text.
             if on_delta is not None:
-                await on_delta(evt, content, None)
+                if tool_sieve:
+                    # DEBUG: Log original content length and sieve events
+                    if content:
+                        log.debug(
+                            "[Collect] 📥 原始内容: content_len=%d, content_preview=%s",
+                            len(content),
+                            repr(content[:100]) if len(content) > 100 else repr(content),
+                        )
+                    
+                    # Filter out non-dict/None events and collect safe text
+                    safe_text_raw = "".join(
+                        e.get("text", "") for e in sieve_events if isinstance(e, dict) and e.get("type") == "content"
+                    )
+                    
+                    # DEBUG: Log sieve events and safe text
+                    log.debug(
+                        "[Collect] 🪄 Sieve输出: sieve_events_count=%d, safe_text_raw_len=%d, safe_text_raw_preview=%s",
+                        len([e for e in sieve_events if isinstance(e, dict) and e.get("type") == "content"]),
+                        len(safe_text_raw),
+                        repr(safe_text_raw[:100]) if len(safe_text_raw) > 100 else repr(safe_text_raw),
+                    )
+                    
+                    if safe_text_raw:
+                        # Trust ToolStreamSieve's output; no additional regex filtering needed.
+                        # Sieve is responsible for separating tool markup from safe content.
+                        log.info("[Collect] ✅ 发送安全文本到 on_delta: len=%d", len(safe_text_raw))
+                        await on_delta(evt, safe_text_raw, None)
+                    else:
+                        # Log buffer status instead of misleading "not returned" warning
+                        pending_chars = len(getattr(tool_sieve, "pending", ""))
+                        capture_chars = len(getattr(tool_sieve, "capture", ""))
+                        capturing = getattr(tool_sieve, "capturing", False)
+                        log.debug(
+                            "[Collect] 🧠 Sieve缓冲状态: sieve_events=%d, 原始content=%d, pending_chars=%d, capture_chars=%d, capturing=%s",
+                            len(sieve_events),
+                            len(content) if content else 0,
+                            pending_chars,
+                            capture_chars,
+                            capturing,
+                        )
+                else:
+                    await on_delta(evt, content, None)
             if request.tools:
                 answer_text = None
                 join_elapsed = 0.0
@@ -730,6 +785,42 @@ async def collect_completion_run(
                     await on_delta(evt, None, completed_calls)
                 return _finalize_result(reason="native_tool_use")
 
+    # Flush any remaining buffered safe text from the sieve before ending the stream.
+    if tool_sieve:
+        flush_events = tool_sieve.flush()
+        # Ensure flush_events is a list to prevent NoneType errors
+        if flush_events is None:
+            flush_events = []
+        
+        # DEBUG: Log flush events status
+        log.debug(
+            "[Collect] 🚰 Flush开始: flush_events_count=%d, answer_fragments_len=%d",
+            len(flush_events),
+            len("".join(answer_fragments)) if answer_fragments else 0,
+        )
+        
+        for flush_evt in flush_events:
+            # Skip non-dict or None events to prevent AttributeError
+            if not isinstance(flush_evt, dict):
+                continue
+            if flush_evt.get("type") == "content" and on_delta is not None:
+                flush_text_raw = flush_evt.get("text", "")
+                
+                # DEBUG: Log flush event details
+                log.debug(
+                    "[Collect] 🚰 Flush事件: type=%s, text_len=%d, text_preview=%s",
+                    flush_evt.get("type", "unknown"),
+                    len(flush_text_raw),
+                    repr(flush_text_raw[:100]) if len(flush_text_raw) > 100 else repr(flush_text_raw),
+                )
+                
+                if flush_text_raw:
+                    # Trust ToolStreamSieve's output; no additional regex filtering needed.
+                    # Sieve is responsible for separating tool markup from safe content.
+                    log.info("[Collect] ✅ Flush发送安全文本到 on_delta: len=%d", len(flush_text_raw))
+                    await on_delta(None, flush_text_raw, None)
+                else:
+                    log.warning("[Collect] ⚠️ Flush事件文本内容为空")
     return _finalize_result(reason="stream_end")
 
 

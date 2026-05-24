@@ -24,6 +24,14 @@ def _first_dsml_tool_markup_index(text: str) -> int:
 
 
 def sanitize_visible_answer_text(answer_text: str, *, tool_use: bool) -> str:
+    """Remove tool-call markup from visible answer text while preserving
+    user-facing prose that appears before any tool invocation markers.
+
+    When tool_use is enabled, any text after the first tool marker
+    (DSML, ##TOOL_CALL##, <tool_call>) is discarded because it consists
+    of structured tool-call syntax rather than user-visible prose.
+    The text before the first marker is retained and returned.
+    """
     text = answer_text or ""
     if not tool_use or not text:
         return text
@@ -34,7 +42,8 @@ def sanitize_visible_answer_text(answer_text: str, *, tool_use: bool) -> str:
         positions.append(dsml_index)
     if not positions:
         return text
-    return ""
+    # Return text before the first tool marker, stripping trailing whitespace
+    return text[:min(positions)].rstrip()
 
 
 def _client_visible_tool_name(name: str, tool_catalog) -> str:

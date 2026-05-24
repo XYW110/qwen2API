@@ -241,10 +241,46 @@ class ToolStreamSieve:
         return self.capture, [], "", True
 
     def _split_safe_content(self, text: str) -> tuple[str, str]:
+        # 1. Check for partial tool markup or unclosed code blocks first.
         hold_starts = [pos for pos in (find_partial_tool_markup_start(text), _unclosed_markdown_code_start(text)) if pos >= 0]
         if hold_starts:
             start = min(hold_starts)
             return text[:start], text[start:]
+        
+        # 2. Check for DSML prefix explicitly to prevent markup leakage.
+        # DSML tags like <|DSML|tool_calls> must be held until fully parsed.
+        folded = text.lower()
+        if folded.startswith('<') and not folded.startswith('</'):
+            # Check if it looks like a DSML tag prefix or other XML-like tag
+            if folded.startswith('<|') or folded.startswith('<!') or folded.startswith('<?'):
+                return "", text
+            # Check if it's a partial DSML or tool tag prefix
+            if len(folded) <= len('<|DSML|'):
+                # Hold any text starting with < that could be a tag prefix
+                return "", text
+        
+        # 3. Optimized legacy hold: Only hold if the suffix actually matches a known marker prefix.
+        # This prevents unnecessary buffering of safe short texts.
         if len(text) <= LEGACY_HOLD_CHARS:
-            return "", text
-        return text[:-LEGACY_HOLD_CHARS], text[-LEGACY_HOLD_CHARS:]
+            # Check if the current text is a prefix of any known tool marker.
+            is_marker_prefix = any(marker.lower().startswith(folded) or folded.startswith(marker.lower()) for marker in TOOL_START_MARKERS)
+            if is_marker_prefix:
+                return "", text
+            # If it's not a marker prefix, release it immediately to reduce latency.
+            return text, ""
+        
+        # 4. For longer text, hold only the last N chars if they look like a marker prefix.
+        suffix = text[-LEGACY_HOLD_CHARS:]
+        lowered_suffix = suffix.lower()
+        
+        # Check for DSML-like suffix
+        if '<|' in suffix or '<!' in suffix or '<?' in suffix:
+            return text[:-LEGACY_HOLD_CHARS], suffix
+            
+        is_suffix_marker_prefix = any(marker.lower().startswith(lowered_suffix) or lowered_suffix.startswith(marker.lower()) for marker in TOOL_START_MARKERS)
+        
+        if is_suffix_marker_prefix:
+            return text[:-LEGACY_HOLD_CHARS], suffix
+        else:
+            # Release all if the suffix doesn't look like a tool marker start.
+            return text, ""

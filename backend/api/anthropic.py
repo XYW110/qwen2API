@@ -305,7 +305,13 @@ async def anthropic_messages(request: Request):
                 }
 
                 async def on_delta(evt: dict[str, Any], text_chunk: str | None, _: list[dict[str, Any]] | None) -> None:
-                    phase = evt.get("phase")
+                    phase = None
+                    # Handle None evt to prevent AttributeError for evt.get() calls
+                    if evt is not None:
+                        phase = evt.get("phase")
+                    # Skip if no text to process (but allow text_chunk when evt is None for flush case)
+                    if text_chunk is None:
+                        return
 
                     # Send message_start on first event
                     if not sse_state["started"]:
@@ -314,6 +320,22 @@ async def anthropic_messages(request: Request):
                             _anthropic_usage(sse_state["current_prompt"], "", extra_prompt_tokens=sse_state["standard_request"].context_attachment_tokens),
                         ))
                         sse_state["started"] = True
+
+                    # Handle flush text from ToolStreamSieve (evt is None, phase is None)
+                    # Treat flush text as answer/text content since it's safe filtered text
+                    if evt is None and text_chunk:
+                        if sse_state["block_type"] != "text":
+                            if sse_state["block_type"] is not None:
+                                await queue.put(stream_presenter.anthropic_content_block_stop(sse_state["block_index"]))
+                            sse_state["block_type"] = "text"
+                            sse_state["block_index"] += 1
+                            await queue.put(stream_presenter.anthropic_content_block_start(
+                                sse_state["block_index"], {"type": "text", "text": ""},
+                            ))
+                        await queue.put(stream_presenter.anthropic_content_block_delta(
+                            sse_state["block_index"], {"type": "text_delta", "text": text_chunk},
+                        ))
+                        return
 
                     # Handle thinking blocks
                     if text_chunk and phase in ("think", "thinking_summary"):
