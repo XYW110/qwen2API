@@ -1,17 +1,21 @@
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 import asyncio
+import json as _json
 import logging
 from typing import Any
 
 from backend.core.config import resolve_model
+from backend.core.config import settings
 from backend.core.request_logging import new_request_id, request_context, update_request_context
 from backend.runtime import stream_presenter
+from backend.runtime.execution import build_tool_directive
 from backend.services.completion_bridge import run_retryable_completion_bridge
 from backend.services.auth_quota import resolve_auth_context
-from backend.services.response_formatters import build_gemini_generate_payload
+from backend.services.response_formatters import build_gemini_generate_payload, _client_visible_tool_name
 from backend.services.standard_request_builder import build_chat_standard_request
 from backend.toolcore.request_normalizer import normalize_gemini_request, to_prompt_payload
+from backend.toolcore.stream_sieve import ToolStreamSieve
 
 log = logging.getLogger("qwen2api.gemini")
 router = APIRouter()
@@ -25,12 +29,44 @@ def _gemini_to_chat_payload(model: str, body: dict[str, Any], *, force_stream: b
     for message in body.get("contents", []) or []:
         role = "assistant" if message.get("role") == "model" else "user"
         text_parts: list[str] = []
+        func_calls: list[dict[str, Any]] = []
+        func_responses: list[dict[str, Any]] = []
         for part in message.get("parts", []) or []:
+            if not isinstance(part, dict):
+                continue
             text = part.get("text")
-            if text:
+            if isinstance(text, str) and text:
                 text_parts.append(text)
+            elif "functionCall" in part and isinstance(part["functionCall"], dict):
+                func_calls.append(part["functionCall"])
+            elif "functionResponse" in part and isinstance(part["functionResponse"], dict):
+                func_responses.append(part["functionResponse"])
         if text_parts:
             messages.append({"role": role, "content": "\n".join(text_parts)})
+        if func_calls and role == "assistant":
+            for fc in func_calls:
+                messages.append({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": f"call_{len(messages)}",
+                        "type": "function",
+                        "function": {
+                            "name": str(fc.get("name", "")),
+                            "arguments": _json.dumps(fc.get("args", {}), ensure_ascii=False) if isinstance(fc.get("args"), dict) else "{}",
+                        },
+                    }],
+                })
+        if func_responses and role == "user":
+            for fr in func_responses:
+                resp = fr.get("response")
+                content = _json.dumps(resp, ensure_ascii=False) if isinstance(resp, dict) else str(resp or "")
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": f"call_{len(messages)}",
+                    "name": str(fr.get("name", "")),
+                    "content": content,
+                })
 
     tools: list[dict[str, Any]] = []
     for tool in body.get("tools", []) or []:
@@ -139,7 +175,7 @@ async def gemini_generate_content(model: str, request: Request):
             raise HTTPException(status_code=500, detail=str(e))
 
         log.info(f"[Gemini] Request complete. Generated {len(execution.state.answer_text)} characters.")
-        return JSONResponse(build_gemini_generate_payload(execution=execution))
+        return JSONResponse(build_gemini_generate_payload(execution=execution, standard_request=standard_request))
 
 
 @router.post("/v1beta/models/{model}:streamGenerateContent")
@@ -159,8 +195,32 @@ async def gemini_stream_generate_content(model: str, request: Request):
         async def generate():
             queue: asyncio.Queue[str | None] = asyncio.Queue()
 
-            async def on_delta(evt, text_chunk, _):
-                if text_chunk and evt.get("phase") == "answer":
+            # Always create a new-version ToolStreamSieve when tools are present.
+            # This is the second line of defence — the sieve inside execution.py
+            # may use the old ToolSieve when TOOLCORE_V2_ENABLED is False, which
+            # cannot detect DSML markup.
+            tool_sieve = ToolStreamSieve(standard_request.tool_names) if standard_request.tool_names else None
+
+            async def on_delta(evt, text_chunk, _tool_calls):
+                if not text_chunk:
+                    return
+                # Stream answer-phase text (and flush text where phase may be None).
+                phase = evt.get("phase") if evt is not None else None
+                if phase not in ("answer", None):
+                    return
+
+                if tool_sieve:
+                    sieve_events = tool_sieve.process_chunk(text_chunk)
+                    for sieve_evt in (sieve_events or []):
+                        if not isinstance(sieve_evt, dict):
+                            continue
+                        if sieve_evt.get("type") == "content":
+                            safe_text = sieve_evt.get("text", "")
+                            if safe_text:
+                                await queue.put(chunk_formatter(safe_text))
+                        # tool_calls from sieve are handled post-completion
+                        # via build_tool_directive, so we skip them here.
+                else:
                     await queue.put(chunk_formatter(text_chunk))
 
             async def runner():
@@ -178,7 +238,50 @@ async def gemini_stream_generate_content(model: str, request: Request):
                         capture_events=False,
                         on_delta=on_delta,
                     )
-                    log.info(f"[Gemini] Request complete. Generated {len(result.execution.state.answer_text)} characters.")
+                    execution = result.execution
+
+                    # Flush any remaining buffered safe text from the sieve.
+                    if tool_sieve:
+                        for flush_evt in (tool_sieve.flush() or []):
+                            if isinstance(flush_evt, dict) and flush_evt.get("type") == "content":
+                                safe_text = flush_evt.get("text", "")
+                                if safe_text:
+                                    await queue.put(chunk_formatter(safe_text))
+
+                    # Emit tool-call result chunk at the end of the stream if
+                    # the model decided to call a function.
+                    directive = build_tool_directive(standard_request, execution.state)
+                    if directive.stop_reason == "tool_use":
+                        tool_call_parts = [
+                            {
+                                "functionCall": {
+                                    "name": _client_visible_tool_name(block.get("name", ""), standard_request.tool_catalog),
+                                    "args": block.get("input", {}),
+                                }
+                            }
+                            for block in directive.tool_blocks
+                            if block.get("type") == "tool_use" and block.get("name")
+                        ]
+                        if tool_call_parts:
+                            tc_payload = {
+                                "candidates": [
+                                    {
+                                        "content": {
+                                            "parts": tool_call_parts,
+                                            "role": "model",
+                                        },
+                                        "finishReason": "STOP",
+                                        "index": 0,
+                                    }
+                                ]
+                            }
+                            import json as _json
+                            if alt_sse:
+                                await queue.put(f"data: {_json.dumps(tc_payload, ensure_ascii=False)}\n\n")
+                            else:
+                                await queue.put(_json.dumps(tc_payload, ensure_ascii=False) + "\n")
+
+                    log.info(f"[Gemini] Stream complete. Generated {len(execution.state.answer_text)} chars, tool_use={directive.stop_reason == 'tool_use'}.")
                 except Exception as e:
                     await queue.put(stream_presenter.gemini_error_chunk(str(e)))
                 finally:

@@ -171,5 +171,20 @@ def build_anthropic_message_payload(*, msg_id: str, model_name: str, prompt: str
     )
 
 
-def build_gemini_generate_payload(*, execution) -> dict[str, Any]:
-    return build_canonical_gemini_payload(answer_text=execution.state.answer_text)
+def build_gemini_generate_payload(*, execution, standard_request=None) -> dict[str, Any]:
+    directive = build_tool_directive(standard_request, execution.state) if standard_request is not None else None
+    tool_calls: list[dict[str, Any]] | None = None
+    if directive is not None and directive.stop_reason == "tool_use":
+        # Convert internal bridge-N names to client-visible names (e.g.
+        # bridge-0 → mcp__timeMcp__currentTime) so the Gemini client
+        # receives the correct functionCall name it can actually invoke.
+        tool_catalog = getattr(standard_request, "tool_catalog", None) if standard_request is not None else None
+        tool_calls = [
+            {
+                "name": _client_visible_tool_name(block.get("name", ""), tool_catalog),
+                "input": block.get("input", {}),
+            }
+            for block in directive.tool_blocks
+            if block.get("type") == "tool_use" and block.get("name")
+        ] or None
+    return build_canonical_gemini_payload(answer_text=execution.state.answer_text, tool_calls=tool_calls)

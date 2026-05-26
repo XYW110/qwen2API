@@ -39,6 +39,24 @@ def build_chat_standard_request(req_data: dict, *, default_model: str, surface: 
     for field_name in ("system", "developer", "instructions"):
         if field_name in req_data:
             normalized_payload[field_name] = req_data.get(field_name, "")
+
+    # ── ToolCatalog preservation ──────────────────────────────────────────
+    #
+    # When the caller already normalised tools through an upstream normalizer
+    # (e.g.  normalize_gemini_request → to_prompt_payload), the *original*
+    # ToolCatalog is carried in req_data["_tool_catalog"].  That catalog
+    # knows the MCP→bridge mapping (mcp__timeMcp__currentTime ↔ bridge-0).
+    #
+    # Inside this function, normalize_chat_request + to_prompt_payload
+    # create a *second* ToolCatalog from the bridge-N-only payload tools.
+    # That second catalog maps bridge-0 → bridge-0 and loses all client-
+    # visible names, so _client_visible_tool_name() would return "bridge-0"
+    # instead of "mcp__timeMcp__currentTime".
+    #
+    # We read the *original* catalog from req_data (the upstream payload),
+    # NOT from normalized_payload (the re-normalized payload).
+    preserved_tool_catalog = req_data.get("_tool_catalog")
+
     prompt_result = messages_to_prompt(normalized_payload, client_profile=effective_client_profile)
     tools = prompt_result.tools
     tool_names = [tool_name for tool_name in (tool.get("name") for tool in tools) if isinstance(tool_name, str) and tool_name]
@@ -61,7 +79,7 @@ def build_chat_standard_request(req_data: dict, *, default_model: str, surface: 
         tools=tools,
         tool_names=tool_names,
         tool_name_registry=build_tool_name_registry(tool_names),
-        tool_catalog=normalized_request.tool_catalog,
+        tool_catalog=preserved_tool_catalog or normalized_request.tool_catalog,
         tool_enabled=prompt_result.tool_enabled,
         tool_choice_mode=tool_choice.mode,
         required_tool_name=tool_choice.required_tool_name,

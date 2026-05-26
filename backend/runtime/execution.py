@@ -410,7 +410,28 @@ def should_retry_textual_tool_contract(answer_text: str) -> bool:
         return False
     if "##TOOL_CALL##" in answer_text or "<tool_call>" in answer_text:
         return True
-    return contains_tool_markup_syntax_outside_ignored(answer_text)
+    if contains_tool_markup_syntax_outside_ignored(answer_text):
+        # DSML markup with only internal bridge-N names is not a real
+        # tool contract that needs retrying — it's protocol-internal.
+        if _is_dsml_with_only_bridge_names(answer_text):
+            return False
+        return True
+    return False
+
+
+def _is_dsml_with_only_bridge_names(text: str) -> bool:
+    """Return True if *text* contains DSML markup where all invoke names
+    match the internal ``bridge-N`` pattern.  These are protocol-internal
+    names that the model uses when the upstream API doesn't expose the
+    real tool names.  They should *not* trigger a retry.
+    """
+    if "<|DSML|" not in text:
+        return False
+    invoke_names = re.findall(r'<\|DSML\|invoke\s+name="([^"]*)"', text)
+    if not invoke_names:
+        # Has DSML wrapper but no invoke tags — still internal, don't retry.
+        return True
+    return all(re.fullmatch(r"bridge-\d+", name) for name in invoke_names)
 
 
 def native_tool_calls_to_markup(tool_calls: list[dict[str, Any]]) -> str:
@@ -818,7 +839,7 @@ async def collect_completion_run(
                     # Trust ToolStreamSieve's output; no additional regex filtering needed.
                     # Sieve is responsible for separating tool markup from safe content.
                     log.info("[Collect] ✅ Flush发送安全文本到 on_delta: len=%d", len(flush_text_raw))
-                    await on_delta(None, flush_text_raw, None)
+                    await on_delta({"phase": "answer"}, flush_text_raw, None)
                 else:
                     log.warning("[Collect] ⚠️ Flush事件文本内容为空")
     return _finalize_result(reason="stream_end")
@@ -1031,16 +1052,35 @@ def evaluate_retry_directive(
                     )
                 directive = parse_tool_directive_once(request, state)
                 if directive.stop_reason != "tool_use":
-                    fallback_tool_name = request.tool_names[0] if request.tool_names else "tool"
-                    return _retry(
-                        f"unparsed_textual_tool_contract:{fallback_tool_name}",
-                        tool_parser.inject_format_reminder_for_allowed_tools(
-                            current_prompt,
-                            fallback_tool_name,
-                            request.tool_names,
-                            client_profile=getattr(request, "client_profile", CLAUDE_CODE_OPENAI_PROFILE),
-                        ),
-                    )
+                    # Critical guard: if the stream parser found NO structured
+                    # tool calls (state.tool_calls is empty), then any DSML
+                    # markup in answer_text was embedded inside prose text,
+                    # NOT as a real tool contract.  The second-layer
+                    # ToolStreamSieve (in gemini.py / anthropic.py) has
+                    # already filtered it out during streaming, so the
+                    # client received only clean text.  Retrying would only
+                    # waste an API call and send confusing duplicate output.
+                    if not state.tool_calls:
+                        log.info(
+                            "[Retry] Skipping retry: stream parser found no structured "
+                            "tool calls (tool_calls=0). Any DSML in answer_text was "
+                            "embedded in prose and already filtered by the stream sieve."
+                        )
+                    elif _is_dsml_with_only_bridge_names(state.answer_text):
+                        log.info(
+                            "[Retry] Skipping retry: DSML markup contains only internal bridge-N names, not client-visible tool calls"
+                        )
+                    else:
+                        fallback_tool_name = request.tool_names[0] if request.tool_names else "tool"
+                        return _retry(
+                            f"unparsed_textual_tool_contract:{fallback_tool_name}",
+                            tool_parser.inject_format_reminder_for_allowed_tools(
+                                current_prompt,
+                                fallback_tool_name,
+                                request.tool_names,
+                                client_profile=getattr(request, "client_profile", CLAUDE_CODE_OPENAI_PROFILE),
+                            ),
+                        )
         if directive is None:
             directive = parse_tool_directive_once(request, state)
 

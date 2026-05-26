@@ -218,8 +218,19 @@ class ToolStreamSieve:
         first_tag = find_tool_markup_tag_outside_ignored(self.capture, 0)
         if first_tag is not None and first_tag.name == "tool_calls":
             prefix, calls, suffix, ready = consume_dsml_tool_capture(self.capture, allowed_names)
-            if not ready or not calls:
+            if not ready:
+                # Block is incomplete — wait for more data.
                 return "", [], "", False
+            if not calls:
+                # Block is fully received but contained no recognised tool calls
+                # (e.g. tool names like "bridge-0" are not in allowed_names).
+                # Suppress the entire DSML block.  The raw prefix returned by
+                # consume_dsml_tool_capture may itself contain DSML markup
+                # (it is built as prefix + block when calls is empty), so we
+                # strip out any DSML content and only keep truly safe text that
+                # appeared *before* the outer <|DSML|tool_calls> opening tag.
+                safe_prefix = self.capture[:first_tag.start].rstrip()
+                return safe_prefix, [], suffix, True
             return prefix, calls, suffix, True
 
         lowered = self.capture.lower()

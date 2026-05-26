@@ -116,26 +116,106 @@ def _normalize_anthropic_tools(raw_tools: Any) -> list[ToolDefinition]:
     return tools
 
 
-def _normalize_gemini_messages(contents: Any) -> list[dict[str, Any]]:
+def _normalize_gemini_messages(contents: Any, *, tool_catalog: ToolCatalog | None = None) -> list[dict[str, Any]]:
     if contents is None:
         return []
     if not isinstance(contents, list):
         raise ValueError("contents must be a list")
 
     messages: list[dict[str, Any]] = []
+    call_id_counter = 0
+
     for message in contents:
         if not isinstance(message, dict):
             continue
         role = "assistant" if message.get("role") == "model" else "user"
         text_parts: list[str] = []
+        function_calls: list[dict[str, Any]] = []
+        function_responses: list[dict[str, Any]] = []
+
         for part in message.get("parts", []) or []:
             if not isinstance(part, dict):
                 continue
+            # Handle text parts
             text = part.get("text")
             if isinstance(text, str) and text:
                 text_parts.append(text)
+            # Handle functionCall parts (from model messages)
+            elif "functionCall" in part:
+                fc = part["functionCall"]
+                if isinstance(fc, dict):
+                    function_calls.append(fc)
+            # Handle functionResponse parts (from user messages)
+            elif "functionResponse" in part:
+                fr = part["functionResponse"]
+                if isinstance(fr, dict):
+                    function_responses.append(fr)
+
+        # Emit text message if there are text parts
         if text_parts:
             messages.append({"role": role, "content": "\n".join(text_parts)})
+
+        # Handle functionCall parts from model messages
+        # Convert Gemini functionCall → OpenAI assistant message with tool_calls
+        if function_calls and role == "assistant":
+            tool_calls = []
+            for fc in function_calls:
+                call_id = f"call_{call_id_counter}"
+                call_id_counter += 1
+                name = str(fc.get("name", ""))
+                args = fc.get("args") or fc.get("arguments") or {}
+                # Convert client-visible name to model name (bridge-N)
+                if tool_catalog is not None:
+                    model_name = tool_catalog.get_model_name(name)
+                    if model_name is not None:
+                        name = model_name
+                # Serialize args to JSON string (OpenAI format expects string)
+                if isinstance(args, dict):
+                    args_str = json.dumps(args, ensure_ascii=False)
+                else:
+                    args_str = str(args) if args else "{}"
+                tool_calls.append({
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": args_str,
+                    },
+                })
+            if tool_calls:
+                messages.append({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": tool_calls,
+                })
+
+        # Handle functionResponse parts from user messages
+        # Convert Gemini functionResponse → OpenAI tool role message
+        if function_responses and role == "user":
+            for fr in function_responses:
+                fr_name = str(fr.get("name", ""))
+                response_data = fr.get("response")
+                # Convert client-visible name to model name (bridge-N)
+                if tool_catalog is not None:
+                    model_name = tool_catalog.get_model_name(fr_name)
+                    if model_name is not None:
+                        fr_name = model_name
+                # Serialize response content
+                if isinstance(response_data, dict):
+                    content = json.dumps(response_data, ensure_ascii=False)
+                elif isinstance(response_data, str):
+                    content = response_data
+                else:
+                    content = str(response_data) if response_data else ""
+                call_id = f"call_{call_id_counter}"
+                call_id_counter += 1
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "name": fr_name,
+                    "content": content,
+                })
+
     return messages
 
 
@@ -400,9 +480,12 @@ def normalize_anthropic_request(req_data: dict[str, Any]) -> ToolCoreRequest:
 
 def normalize_gemini_request(req_data: dict[str, Any], *, model: str, force_stream: bool | None = None) -> ToolCoreRequest:
     del model, force_stream
-    messages = _normalize_gemini_messages(req_data.get("contents"))
+    # Build tools FIRST so we can pass tool_catalog to message normalizer.
+    # This is critical for converting client-visible functionCall/functionResponse
+    # names to bridge-N model names in multi-turn tool-use conversations.
     tools = _normalize_gemini_tools(req_data.get("tools"))
     tool_catalog = ToolCatalog(tools)
+    messages = _normalize_gemini_messages(req_data.get("contents"), tool_catalog=tool_catalog)
     declared_tool_names = {tool.name for tool in tools}
     raw_tool_choice = _normalize_gemini_tool_choice(req_data)
     if raw_tool_choice is not None and not tools:

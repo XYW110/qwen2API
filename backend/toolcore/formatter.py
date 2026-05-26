@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from typing import Any
 
@@ -127,14 +128,58 @@ def build_canonical_anthropic_message(*, msg_id: str, model_name: str, prompt: s
     }
 
 
-def build_canonical_gemini_payload(*, answer_text: str) -> dict[str, Any]:
+def _strip_dsml_markup(text: str) -> str:
+    """Remove any DSML tool-call markup from *text*, returning only the
+    user-visible prose before the first markup tag.  This is a safety net
+    for cases where the upstream sieve didn't strip the markup (e.g. when
+    TOOLCORE_V2_ENABLED is False and the old sieve doesn't recognise DSML).
+    """
+    if not text or "<|DSML|" not in text:
+        return text
+    # Find the first DSML tag position and return text before it.
+    from backend.toolcall.markup_scan import find_tool_markup_tag_outside_ignored
+    tag = find_tool_markup_tag_outside_ignored(text, 0)
+    while tag is not None:
+        if tag.name in {"tool_calls", "invoke"}:
+            return text[:tag.start].rstrip()
+        tag = find_tool_markup_tag_outside_ignored(text, tag.end)
+    return text
+
+
+def build_canonical_gemini_payload(*, answer_text: str, tool_calls: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Build a Gemini generateContent response payload.
+
+    When *tool_calls* are present the response contains ``functionCall`` parts
+    (Gemini's native tool-call format).  Otherwise a plain text part is used.
+    """
+    if tool_calls:
+        parts: list[dict[str, Any]] = [
+            {
+                "functionCall": {
+                    "name": call.get("name", ""),
+                    "args": call.get("input", {}),
+                }
+            }
+            for call in tool_calls
+            if call.get("name")
+        ]
+        if not parts:
+            # Fallback: no recognised calls — return sanitised text.
+            parts = [{"text": _strip_dsml_markup(answer_text) or ""}]
+        finish_reason = "STOP"
+    else:
+        parts = [{"text": _strip_dsml_markup(answer_text) or ""}]
+        finish_reason = "STOP"
+
     return {
         "candidates": [
             {
                 "content": {
-                    "parts": [{"text": answer_text}],
+                    "parts": parts,
                     "role": "model",
-                }
+                },
+                "finishReason": finish_reason,
+                "index": 0,
             }
         ]
     }

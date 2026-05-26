@@ -19,6 +19,7 @@ from backend.runtime.execution import (
     request_max_attempts,
 )
 from backend.services.auth_quota import resolve_auth_context
+from backend.toolcore.stream_sieve import ToolStreamSieve
 from backend.services.context_attachment_manager import prepare_context_attachments, derive_session_key
 from backend.services.attachment_preprocessor import preprocess_attachments
 from backend.services.client_profiles import CLAUDE_CODE_OPENAI_PROFILE
@@ -302,14 +303,29 @@ async def anthropic_messages(request: Request):
                     "model_name": None,
                     "current_prompt": None,
                     "standard_request": None,
+                    "sieve": None,
                 }
 
-                async def on_delta(evt: dict[str, Any], text_chunk: str | None, _: list[dict[str, Any]] | None) -> None:
+                async def _emit_safe_text(text: str) -> None:
+                    """Send safe (DSML-free) text as an anthropic text_delta."""
+                    if not text:
+                        return
+                    if sse_state["block_type"] != "text":
+                        if sse_state["block_type"] is not None:
+                            await queue.put(stream_presenter.anthropic_content_block_stop(sse_state["block_index"]))
+                        sse_state["block_type"] = "text"
+                        sse_state["block_index"] += 1
+                        await queue.put(stream_presenter.anthropic_content_block_start(
+                            sse_state["block_index"], {"type": "text", "text": ""},
+                        ))
+                    await queue.put(stream_presenter.anthropic_content_block_delta(
+                        sse_state["block_index"], {"type": "text_delta", "text": text},
+                    ))
+
+                async def on_delta(evt: dict[str, Any], text_chunk: str | None, _tool_calls: list[dict[str, Any]] | None) -> None:
                     phase = None
-                    # Handle None evt to prevent AttributeError for evt.get() calls
                     if evt is not None:
                         phase = evt.get("phase")
-                    # Skip if no text to process (but allow text_chunk when evt is None for flush case)
                     if text_chunk is None:
                         return
 
@@ -321,23 +337,7 @@ async def anthropic_messages(request: Request):
                         ))
                         sse_state["started"] = True
 
-                    # Handle flush text from ToolStreamSieve (evt is None, phase is None)
-                    # Treat flush text as answer/text content since it's safe filtered text
-                    if evt is None and text_chunk:
-                        if sse_state["block_type"] != "text":
-                            if sse_state["block_type"] is not None:
-                                await queue.put(stream_presenter.anthropic_content_block_stop(sse_state["block_index"]))
-                            sse_state["block_type"] = "text"
-                            sse_state["block_index"] += 1
-                            await queue.put(stream_presenter.anthropic_content_block_start(
-                                sse_state["block_index"], {"type": "text", "text": ""},
-                            ))
-                        await queue.put(stream_presenter.anthropic_content_block_delta(
-                            sse_state["block_index"], {"type": "text_delta", "text": text_chunk},
-                        ))
-                        return
-
-                    # Handle thinking blocks
+                    # Handle thinking blocks (not filtered by sieve)
                     if text_chunk and phase in ("think", "thinking_summary"):
                         if sse_state["block_type"] != "thinking":
                             if sse_state["block_type"] is not None:
@@ -352,22 +352,41 @@ async def anthropic_messages(request: Request):
                         ))
                         return
 
-                    # Handle answer text (REAL-TIME streaming!)
+                    # Handle answer text — route through ToolStreamSieve to strip DSML
                     if text_chunk and phase == "answer":
-                        if sse_state["block_type"] != "text":
-                            if sse_state["block_type"] is not None:
-                                await queue.put(stream_presenter.anthropic_content_block_stop(sse_state["block_index"]))
-                            sse_state["block_type"] = "text"
-                            sse_state["block_index"] += 1
-                            await queue.put(stream_presenter.anthropic_content_block_start(
-                                sse_state["block_index"], {"type": "text", "text": ""},
-                            ))
-                        await queue.put(stream_presenter.anthropic_content_block_delta(
-                            sse_state["block_index"], {"type": "text_delta", "text": text_chunk},
-                        ))
+                        sieve = sse_state["sieve"]
+                        if sieve is not None:
+                            sieve_events = sieve.process_chunk(text_chunk)
+                            for se in sieve_events or []:
+                                if not isinstance(se, dict):
+                                    continue
+                                if se.get("type") == "content":
+                                    safe = se.get("text", "")
+                                    if safe:
+                                        await _emit_safe_text(safe)
+                                # tool_calls from sieve are handled after completion
+                                # via build_tool_directive, so we skip them here.
+                        else:
+                            await _emit_safe_text(text_chunk)
                         return
 
-                    # Handle tool_call blocks
+                    # Handle flush text (evt may have phase "answer" or be None)
+                    if text_chunk and phase is None:
+                        sieve = sse_state["sieve"]
+                        if sieve is not None:
+                            sieve_events = sieve.process_chunk(text_chunk)
+                            for se in sieve_events or []:
+                                if not isinstance(se, dict):
+                                    continue
+                                if se.get("type") == "content":
+                                    safe = se.get("text", "")
+                                    if safe:
+                                        await _emit_safe_text(safe)
+                        else:
+                            await _emit_safe_text(text_chunk)
+                        return
+
+                    # Handle tool_call blocks (from native tool call events)
                     if phase == "tool_call":
                         extra = evt.get("extra", {}) or {}
                         tool_call_id = extra.get("tool_call_id")
@@ -406,6 +425,14 @@ async def anthropic_messages(request: Request):
                             sse_state["model_name"] = model_name
                             sse_state["msg_id"] = msg_id
                             sse_state["current_prompt"] = prompt
+                            # Create a ToolStreamSieve (always new version) to strip DSML
+                            # markup from streamed answer text.  This is the second line
+                            # of defence — the sieve inside execution.py may use the old
+                            # ToolSieve when TOOLCORE_V2_ENABLED is False.
+                            if standard_request.tool_names:
+                                sse_state["sieve"] = ToolStreamSieve(standard_request.tool_names)
+                            else:
+                                sse_state["sieve"] = None
                             update_request_context(requested_model=model_name, resolved_model=qwen_model)
                             log.info(f"[ANT] model={qwen_model}, stream={standard_request.stream}, tool_enabled={standard_request.tool_enabled}, tools={[t.get('name') for t in standard_request.tools]}, prompt_len={len(prompt)}")
                             current_prompt = prompt
@@ -420,11 +447,24 @@ async def anthropic_messages(request: Request):
                                 sse_state["block_type"] = None
                                 sse_state["block_index"] = -1
                                 sse_state["opened_tool_ids"] = set()
+                                if standard_request.tool_names:
+                                    sse_state["sieve"] = ToolStreamSieve(standard_request.tool_names)
+                                else:
+                                    sse_state["sieve"] = None
 
                                 execution = await collect_completion_run(
                                     client, standard_request, current_prompt,
                                     capture_events=False, on_delta=on_delta,
                                 )
+
+                                # Flush any remaining safe text from the sieve
+                                sieve = sse_state["sieve"]
+                                if sieve is not None:
+                                    for fe in sieve.flush() or []:
+                                        if isinstance(fe, dict) and fe.get("type") == "content":
+                                            safe = fe.get("text", "")
+                                            if safe:
+                                                await _emit_safe_text(safe)
 
                                 retry = evaluate_retry_directive(
                                     request=standard_request, current_prompt=current_prompt,
