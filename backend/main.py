@@ -112,9 +112,17 @@ async def lifespan(app: FastAPI):
         # 启动 API Key 失败记录清理任务
         cleanup_task = asyncio.create_task(cleanup_loop(app))
 
+        # 初始化 ChatIdPool 预热池（减少每次请求的握手时延）
+        from backend.services.chat_id_pool import ChatIdPool
+        chat_id_pool = ChatIdPool(app.state.qwen_client)
+        await chat_id_pool.start()
+        app.state.chat_id_pool = chat_id_pool
+        app.state.qwen_executor.chat_id_pool = chat_id_pool
+
     try:
         yield
     finally:
+        await chat_id_pool.stop()
         cleanup_task.cancel()
         try:
             await cleanup_task

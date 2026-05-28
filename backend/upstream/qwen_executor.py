@@ -21,6 +21,7 @@ class QwenExecutor:
         self.engine = engine
         self.account_pool = account_pool
         self.auth_resolver = AuthResolver(account_pool) if account_pool is not None else None
+        self.chat_id_pool = None  # 由 main.py lifespan 注入
 
     async def create_chat(self, token: str, model: str, chat_type: str = "t2t") -> str:
         request_fn = getattr(self.engine, "_request_json", None) or getattr(self.engine, "api_call", None)
@@ -204,7 +205,17 @@ class QwenExecutor:
             acc = fixed_account
             try:
                 log.info(f"[Executor] using fixed account={acc.email} model={model}")
-                chat_id = existing_chat_id or await self.create_chat(acc.token, model)
+                # 优先从预热池获取，池空则 fallback 到同步创建
+                if existing_chat_id:
+                    chat_id = existing_chat_id
+                elif self.chat_id_pool:
+                    chat_id = await self.chat_id_pool.acquire(acc.email, model)
+                    if chat_id:
+                        log.info(f"[Executor] got chat_id from pool email={acc.email}")
+                    else:
+                        chat_id = await self.create_chat(acc.token, model)
+                else:
+                    chat_id = await self.create_chat(acc.token, model)
                 update_request_context(chat_id=chat_id)
                 if existing_chat_id:
                     log.info(f"[Executor] reusing chat_id={chat_id} account={acc.email}")
@@ -229,9 +240,18 @@ class QwenExecutor:
 
             try:
                 log.info(f"[Executor] acquired account={acc.email} model={model} attempt={attempt + 1}")
-                chat_id = await self.create_chat(acc.token, model)
+                # 优先从预热池获取，池空则 fallback 到同步创建
+                if self.chat_id_pool:
+                    chat_id = await self.chat_id_pool.acquire(acc.email, model)
+                    if chat_id:
+                        log.info(f"[Executor] got chat_id from pool email={acc.email}")
+                    else:
+                        chat_id = await self.create_chat(acc.token, model)
+                        log.info(f"[Executor] created chat_id={chat_id} account={acc.email}")
+                else:
+                    chat_id = await self.create_chat(acc.token, model)
+                    log.info(f"[Executor] created chat_id={chat_id} account={acc.email}")
                 update_request_context(chat_id=chat_id)
-                log.info(f"[Executor] created chat_id={chat_id} account={acc.email}")
                 yield {"type": "meta", "chat_id": chat_id, "acc": acc}
 
                 async for evt in self.stream(acc.token, chat_id, model, content, has_custom_tools, files=files):

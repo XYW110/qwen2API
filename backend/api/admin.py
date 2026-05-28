@@ -107,9 +107,16 @@ class UpdateKeyNoteRequest(BaseModel):
 @router.get("/status", dependencies=[Depends(verify_admin)])
 async def get_system_status(request: Request):
     pool = request.app.state.account_pool
+    # 获取 chat_id_pool 统计信息（如果存在）
+    chat_id_pool_stats = None
+    chat_id_pool = getattr(request.app.state, "chat_id_pool", None)
+    if chat_id_pool:
+        chat_id_pool_stats = await chat_id_pool.stats()
 
     return {
         "accounts": pool.status(),
+        "chat_id_pool": chat_id_pool_stats,
+        "per_account": pool.account_diagnostics(),
         "request_runtime": {
             "mode": "direct_http",
             "browser_required_for_requests": False,
@@ -599,24 +606,32 @@ async def export_accounts(request: Request):
 
 
 @router.get("/settings", dependencies=[Depends(verify_admin)])
-async def get_settings():
+async def get_settings(request: Request):
     from backend.core.config import MODEL_MAP
-    # 从 settings.py 所在的同级导入 VERSION，避免循环导入或未定义报错
     from backend.core.config import settings as backend_settings
 
     # 强制将 dict 转换，确保能被 JSON 序列化
     safe_map = {k: v for k, v in MODEL_MAP.items()}
+
+    # 从 app.state 读取 chat_id_pool 实际配置
+    chat_id_pool = getattr(request.app.state, "chat_id_pool", None)
+    chat_id_pool_target = chat_id_pool._target if chat_id_pool else 3
+    chat_id_pool_ttl_seconds = chat_id_pool._ttl if chat_id_pool else 1800
+
     return {
         "version": "2.0.0",
         "max_inflight_per_account": backend_settings.MAX_INFLIGHT_PER_ACCOUNT,
+        "global_max_inflight": getattr(backend_settings, "GLOBAL_MAX_INFLIGHT", 0),
         "model_aliases": safe_map,
         "account_selection_strategy": backend_settings.ACCOUNT_SELECTION_STRATEGY,
         "account_max_failures_before_cooldown": backend_settings.ACCOUNT_MAX_FAILURES_BEFORE_COOLDOWN,
-        "account_cooldown_period_seconds": backend_settings.ACCOUNT_COOLDOWN_PERIOD_SECONDS
+        "account_cooldown_period_seconds": backend_settings.ACCOUNT_COOLDOWN_PERIOD_SECONDS,
+        "chat_id_pool_target": chat_id_pool_target,
+        "chat_id_pool_ttl_seconds": chat_id_pool_ttl_seconds,
     }
 
 @router.put("/settings", dependencies=[Depends(verify_admin)])
-async def update_settings(data: dict):
+async def update_settings(request: Request, data: dict):
     from backend.core.config import MODEL_MAP
     if "max_inflight_per_account" in data:
         settings.MAX_INFLIGHT_PER_ACCOUNT = data["max_inflight_per_account"]
@@ -629,6 +644,19 @@ async def update_settings(data: dict):
         settings.ACCOUNT_MAX_FAILURES_BEFORE_COOLDOWN = data["account_max_failures_before_cooldown"]
     if "account_cooldown_period_seconds" in data:
         settings.ACCOUNT_COOLDOWN_PERIOD_SECONDS = data["account_cooldown_period_seconds"]
+
+    # chat_id_pool 运行时参数更新
+    chat_id_pool = getattr(request.app.state, "chat_id_pool", None)
+    if chat_id_pool:
+        if "chat_id_pool_target" in data:
+            chat_id_pool._target = int(data["chat_id_pool_target"])
+        if "chat_id_pool_ttl_seconds" in data:
+            chat_id_pool._ttl = float(data["chat_id_pool_ttl_seconds"])
+
+    # global_max_inflight 更新（如果配置中存在）
+    if "global_max_inflight" in data and hasattr(settings, "GLOBAL_MAX_INFLIGHT"):
+        settings.GLOBAL_MAX_INFLIGHT = data["global_max_inflight"]
+
     return {"ok": True}
 
 @router.get("/keys", dependencies=[Depends(verify_admin)])
