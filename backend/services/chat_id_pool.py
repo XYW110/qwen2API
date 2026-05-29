@@ -30,7 +30,7 @@ class _Entry:
 
 
 class ChatIdPool:
-    """按账号邮箱 key 的 chat_id 队列。协程安全。"""
+    """按 (email, model) 双维度隔离的 chat_id 队列。协程安全。"""
 
     def __init__(
         self,
@@ -44,7 +44,7 @@ class ChatIdPool:
         self._target = target_per_account
         self._ttl = ttl_seconds
         self._default_model = default_model
-        self._queues: dict[str, deque[_Entry]] = {}
+        self._queues: dict[tuple[str, str], deque[_Entry]] = {}
         self._lock = asyncio.Lock()
         self._refill_task: Optional[asyncio.Task] = None
         self._shutdown = False
@@ -82,12 +82,13 @@ class ChatIdPool:
                 pass
 
     async def acquire(self, email: str, model: str | None = None) -> Optional[str]:
-        """优先从预热池取 chat_id；池空或过期则返回 None（调用方走同步 create_chat）。"""
+        """按 (email, model) 精确匹配从预热池取 chat_id；池空或过期则返回 None。"""
         if not email:
             self._miss_count += 1
             return None
+        key = (email, model or self._default_model)
         async with self._lock:
-            q = self._queues.get(email)
+            q = self._queues.get(key)
             if not q:
                 self._miss_count += 1
                 return None
@@ -95,26 +96,27 @@ class ChatIdPool:
             while q:
                 entry = q.popleft()
                 if now - entry.created_at < self._ttl:
-                    log.debug(f"[ChatIdPool] HIT email={email} chat_id={entry.chat_id}")
+                    log.debug(f"[ChatIdPool] HIT key={key} chat_id={entry.chat_id}")
                     self._hit_count += 1
                     return entry.chat_id
-                log.debug(f"[ChatIdPool] expired chat_id={entry.chat_id} email={email}")
+                log.debug(f"[ChatIdPool] expired chat_id={entry.chat_id} key={key}")
         self._miss_count += 1
         return None
 
     async def _prewarm_one(self, account, model: str) -> None:
-        """为某账号预建一个 chat_id 加入队列。"""
+        """为某账号按模型预建一个 chat_id 加入队列。"""
         try:
             token = account.token
             email = account.email
             if not token:
                 log.warning(f"[ChatIdPool] prewarm skipped email={email}: missing token")
                 return
+            key = (email, model)
             chat_id = await self._client.create_chat(token, model)
             async with self._lock:
-                q = self._queues.setdefault(email, deque())
+                q = self._queues.setdefault(key, deque())
                 q.append(_Entry(chat_id))
-            log.info(f"[ChatIdPool] prewarmed email={email} chat_id={chat_id} pool_size={len(q)}")
+            log.info(f"[ChatIdPool] prewarmed key={key} chat_id={chat_id} pool_size={len(q)}")
         except Exception as e:
             err = str(e) or type(e).__name__
             log.warning(f"[ChatIdPool] prewarm failed email={getattr(account, 'email', '?')}: {err}")
@@ -144,42 +146,45 @@ class ChatIdPool:
         ]
         for acc in valid:
             async with self._lock:
-                q_size = len(self._queues.get(acc.email, []))
+                q_size = len(self._queues.get((acc.email, self._default_model), []))
             deficit = self._target - q_size
             # 每轮每账号最多补 1 个，避免突发 API 压力
             if deficit > 0:
                 await self._prewarm_one(acc, self._default_model)
 
     async def invalidate(self, email: str, chat_id: str) -> None:
-        """标记某个 chat_id 为坏的——从池里移除。"""
+        """遍历该 email 所有模型队列，移除匹配的 chat_id。"""
         if not email or not chat_id:
             return
         async with self._lock:
-            q = self._queues.get(email)
-            if not q:
-                return
-            remaining = deque(e for e in q if e.chat_id != chat_id)
-            self._queues[email] = remaining
-            if len(remaining) != len(q):
+            removed = False
+            for key in list(self._queues):
+                if key[0] != email:
+                    continue
+                q = self._queues[key]
+                remaining = deque(e for e in q if e.chat_id != chat_id)
+                if len(remaining) != len(q):
+                    self._queues[key] = remaining
+                    removed = True
+            if removed:
                 log.info(f"[ChatIdPool] invalidated email={email} chat_id={chat_id}")
 
     async def flush_account(self, email: str) -> int:
-        """清空某账号的池。返回清理数量。"""
+        """清空该 email 所有模型的池。返回清理数量。"""
         if not email:
             return 0
         async with self._lock:
-            q = self._queues.get(email)
-            if not q:
-                return 0
-            n = len(q)
-            self._queues[email] = deque()
+            n = 0
+            keys_to_flush = [k for k in self._queues if k[0] == email]
+            for key in keys_to_flush:
+                n += len(self._queues.pop(key))
             if n:
                 log.info(f"[ChatIdPool] flushed {n} entries for email={email}")
         return n
 
     async def size(self, email: str) -> int:
         async with self._lock:
-            return len(self._queues.get(email, []))
+            return sum(len(q) for key, q in self._queues.items() if key[0] == email)
 
     async def total_size(self) -> int:
         async with self._lock:
@@ -188,8 +193,8 @@ class ChatIdPool:
     async def stats(self) -> dict:
         """返回当前池的统计信息，供 admin API 使用。"""
         async with self._lock:
-            per_account = {email: len(q) for email, q in self._queues.items()}
-            total = sum(per_account.values())
+            per_account = {f"{email}:{model}": len(q) for (email, model), q in self._queues.items()}
+            total = sum(len(q) for q in self._queues.values())
             hit = self._hit_count
             miss = self._miss_count
         total_acquires = hit + miss
