@@ -6,6 +6,7 @@ import {
   ServerCrash,
   Code,
 } from "lucide-react";
+
 import { Button } from "../components/ui/button";
 import { toast } from "sonner";
 import { getAuthHeader } from "../lib/auth";
@@ -18,6 +19,7 @@ export default function SettingsPage() {
   const [globalMaxInflight, setGlobalMaxInflight] = useState(0);
   const [poolTarget, setPoolTarget] = useState(5);
   const [poolTtlMin, setPoolTtlMin] = useState(10);
+  const [prewarmModels, setPrewarmModels] = useState("");
   const [modelAliases, setModelAliases] = useState("");
   const [maxTotalPrewarm, setMaxTotalPrewarm] = useState(100);
 
@@ -37,6 +39,7 @@ export default function SettingsPage() {
         setGlobalMaxInflight(data.global_max_inflight || 0);
         setPoolTarget(data.chat_id_pool_target || 5);
         setPoolTtlMin(Math.round((data.chat_id_pool_ttl_seconds || 600) / 60));
+        setPrewarmModels((data.chat_id_pool_prewarm_models || []).join(", "));
         setModelAliases(JSON.stringify(data.model_aliases || {}, null, 2));
         setMaxTotalPrewarm(data.chat_id_pool_max_total_prewarm ?? 100);
       })
@@ -81,12 +84,17 @@ export default function SettingsPage() {
   };
 
   const handleSavePool = () => {
+    const parsedModels = prewarmModels
+      .split(",")
+      .map((m) => m.trim())
+      .filter(Boolean);
     fetch(`${API_BASE}/api/admin/settings`, {
       method: "PUT",
       headers: { "Content-Type": "application/json", ...getAuthHeader() },
       body: JSON.stringify({
         chat_id_pool_target: Number(poolTarget),
         chat_id_pool_ttl_seconds: Number(poolTtlMin) * 60,
+        chat_id_pool_prewarm_models: parsedModels,
         chat_id_pool_max_total_prewarm: Number(maxTotalPrewarm),
       }),
     }).then((res) => {
@@ -276,7 +284,7 @@ export default function SettingsPage() {
           </div>
         </div>
 
-        {/* Core Settings */}
+        {/* Core Concurrency Settings */}
         <div className="rounded-xl border bg-card text-card-foreground shadow-sm min-w-0">
           <div className="flex flex-col space-y-1.5 p-6 border-b bg-muted/30">
             <div className="flex items-center gap-2">
@@ -391,6 +399,22 @@ export default function SettingsPage() {
                 value={poolTtlMin}
                 onChange={(e) => setPoolTtlMin(Number(e.target.value))}
                 className="flex h-8 w-20 rounded-md border border-input bg-background px-3 py-1 text-sm text-center"
+              />
+            </div>
+            <div className="flex justify-between items-center py-2 border-b flex-wrap gap-4">
+              <div className="space-y-1 min-w-0 flex-1">
+                <span className="text-sm font-medium">预热模型列表</span>
+                <p className="text-xs text-muted-foreground">
+                  按实际请求模型隔离预热，英文逗号分隔。上游不支持跨模型复用
+                  chat_id。
+                </p>
+              </div>
+              <input
+                type="text"
+                value={prewarmModels}
+                onChange={(e) => setPrewarmModels(e.target.value)}
+                placeholder="qwen3.6-plus, qwen3.5-flash"
+                className="flex h-8 w-64 rounded-md border border-input bg-background px-3 py-1 text-sm"
               />
             </div>
             <div className="flex justify-between items-center py-2 border-b flex-wrap gap-4">

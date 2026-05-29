@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     CONFIG_FILE: str = os.getenv("CONFIG_FILE", str(DATA_DIR / "config.json"))
 
     # 预热模型列表
-    CHAT_ID_POOL_PREWARM_MODELS: List[str] = ["qwen3.6-plus"]
+    CHAT_ID_POOL_PREWARM_MODELS: List[str] = []
     MAX_TOTAL_PREWARM_CHAT_IDS: int = 100
 
     # ????? / ????

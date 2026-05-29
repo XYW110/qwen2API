@@ -621,7 +621,7 @@ async def get_settings(request: Request):
     # 读取预热模型列表（优先从 chat_id_pool 实例，其次从配置文件，最后默认值）
     from backend.core.config import load_prewarm_config
     prewarm_cfg = load_prewarm_config()
-    chat_id_pool_prewarm_models = getattr(chat_id_pool, "_prewarm_models", None) or prewarm_cfg.get("prewarm_models", ["qwen3.6-plus"])
+    chat_id_pool_prewarm_models = getattr(chat_id_pool, "_prewarm_models", None) or prewarm_cfg.get("prewarm_models", [])
 
     return {
         "version": "2.0.0",

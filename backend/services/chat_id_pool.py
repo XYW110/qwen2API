@@ -1,6 +1,3 @@
-Looking at the conflict: HEAD uses `dict[tuple[str, str], deque[_Entry]]` for `_queues`, which is consistent with all methods in the file (`acquire`, `_prewarm_one`, `_refill_once`, `invalidate`, `flush_account`, `size`, `stats` all use tuple keys). The incoming branch added `_prewarm_models` (new feature) but incorrectly changed the queue key type to `str`, which would break every method. The correct merge keeps `_prewarm_models` from the incoming branch and the tuple key type from HEAD.
-
-```python
 """Chat ID 预热池：预先为每个可用账号创建若干 chat_id 放在队列里，
 请求到来时直接从队列 pop 一个省去 /chats/new 握手（实测 500ms~6s 不等）。
 
@@ -17,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import time
 from collections import deque
 from typing import Optional
@@ -41,20 +39,19 @@ class ChatIdPool:
         *,
         target_per_account: int = 3,
         ttl_seconds: float = 1800,
-        default_model: str = "qwen3.6-plus",
         prewarm_models: list[str] | None = None,
     ):
         self._client = client
         self._target = target_per_account
         self._ttl = ttl_seconds
-        self._default_model = default_model
-        self._prewarm_models: list[str] = prewarm_models or [default_model]
+        self._prewarm_models: list[str] = list(prewarm_models) if prewarm_models else []
         self._queues: dict[tuple[str, str], deque[_Entry]] = {}
         self._lock = asyncio.Lock()
         self._refill_task: Optional[asyncio.Task] = None
         self._shutdown = False
         self._hit_count = 0
         self._miss_count = 0
+        self._error_count = 0
         self._model_failure_counts: dict[str, int] = {}  # model -> 连续失败次数
         self.MAX_CONSECUTIVE_FAILURES = 3
         self._last_config_mtime: float = 0.0
@@ -83,7 +80,7 @@ class ChatIdPool:
     async def start(self) -> None:
         """服务启动时调用，完成首轮预热 + 启动后台补位 loop。"""
         self._refill_task = asyncio.create_task(self._refill_loop())
-        log.info(f"[ChatIdPool] started (target={self._target}, ttl={self._ttl}s)")
+        log.info(f"[ChatIdPool] started (target={self._target}, ttl={self._ttl}s, prewarm_models={self._prewarm_models})")
 
     async def stop(self) -> None:
         self._shutdown = True
@@ -96,10 +93,10 @@ class ChatIdPool:
 
     async def acquire(self, email: str, model: str | None = None) -> Optional[str]:
         """按 (email, model) 精确匹配从预热池取 chat_id；池空或过期则返回 None。"""
-        if not email:
+        if not email or not model:
             self._miss_count += 1
             return None
-        key = (email, model or self._default_model)
+        key = (email, model)
         async with self._lock:
             q = self._queues.get(key)
             if not q:
@@ -115,6 +112,11 @@ class ChatIdPool:
                 log.debug(f"[ChatIdPool] expired chat_id={entry.chat_id} key={key}")
         self._miss_count += 1
         return None
+
+    def record_error(self) -> None:
+        """记录一次从池中取出的 chat_id 使用失败（stream 阶段出错）。"""
+        self._error_count += 1
+        log.warning(f"[ChatIdPool] chat_id usage error, total_errors={self._error_count}")
 
     async def _prewarm_one(self, account, model: str) -> None:
         """为某账号按模型预建一个 chat_id 加入队列。"""
@@ -168,8 +170,17 @@ class ChatIdPool:
             log.warning(f"[ChatIdPool] config reload failed: {e}")
 
     async def _refill_once(self) -> None:
-        """遍历账号池里所有 valid 账号，每个不足 target 就补位。"""
+        """遍历账号池里所有 valid 账号，每账号总计不足 target 则随机选模型补位。"""
+        if not self._prewarm_models:
+            return
         await self._reload_config()
+        # 过滤掉连续失败过多的模型
+        available_models = [
+            m for m in self._prewarm_models
+            if self._model_failure_counts.get(m, 0) < self.MAX_CONSECUTIVE_FAILURES
+        ]
+        if not available_models:
+            return
         pool = getattr(self._client, "account_pool", None)
         if pool is None:
             return
@@ -180,22 +191,23 @@ class ChatIdPool:
             if getattr(a, "token", "") and getattr(a, "status_code", "valid") == "valid"
         ]
         for acc in valid:
-            # 检查预热总数上限
+            # 检查全局预热总数上限
             async with self._lock:
                 current_total = sum(len(q) for q in self._queues.values())
             if current_total >= self._max_total_prewarm:
                 log.debug(f"[ChatIdPool] total prewarm {current_total} >= limit {self._max_total_prewarm}, skip refill")
                 return
-            for model in self._prewarm_models:
-                # 跳过连续失败过多的模型
-                if self._model_failure_counts.get(model, 0) >= self.MAX_CONSECUTIVE_FAILURES:
-                    continue
-                async with self._lock:
-                    q_size = len(self._queues.get((acc.email, model), []))
-                deficit = self._target - q_size
-                # 每轮每账号每模型最多补 1 个，避免突发 API 压力
-                if deficit > 0:
-                    await self._prewarm_one(acc, model)
+            # 统计该账号所有模型的 chat_id 总数
+            async with self._lock:
+                acc_total = sum(
+                    len(q) for key, q in self._queues.items()
+                    if key[0] == acc.email
+                )
+            deficit = self._target - acc_total
+            # 每轮每账号最多补 1 个，随机选模型
+            if deficit > 0:
+                model = random.choice(available_models)
+                await self._prewarm_one(acc, model)
 
     async def invalidate(self, email: str, chat_id: str) -> None:
         """遍历该 email 所有模型队列，移除匹配的 chat_id。"""
@@ -251,6 +263,6 @@ class ChatIdPool:
             "per_account": per_account,
             "hit_count": hit,
             "miss_count": miss,
+            "error_count": self._error_count,
             "hit_rate": round(hit_rate, 1),
         }
-```
