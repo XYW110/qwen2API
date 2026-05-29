@@ -618,6 +618,11 @@ async def get_settings(request: Request):
     chat_id_pool_target = chat_id_pool._target if chat_id_pool else 3
     chat_id_pool_ttl_seconds = chat_id_pool._ttl if chat_id_pool else 1800
 
+    # 读取预热模型列表（优先从 chat_id_pool 实例，其次从配置文件，最后默认值）
+    from backend.core.config import load_prewarm_config
+    prewarm_cfg = load_prewarm_config()
+    chat_id_pool_prewarm_models = getattr(chat_id_pool, "_prewarm_models", None) or prewarm_cfg.get("prewarm_models", ["qwen3.6-plus"])
+
     return {
         "version": "2.0.0",
         "max_inflight_per_account": backend_settings.MAX_INFLIGHT_PER_ACCOUNT,
@@ -628,6 +633,7 @@ async def get_settings(request: Request):
         "account_cooldown_period_seconds": backend_settings.ACCOUNT_COOLDOWN_PERIOD_SECONDS,
         "chat_id_pool_target": chat_id_pool_target,
         "chat_id_pool_ttl_seconds": chat_id_pool_ttl_seconds,
+        "chat_id_pool_prewarm_models": chat_id_pool_prewarm_models,
     }
 
 @router.put("/settings", dependencies=[Depends(verify_admin)])
@@ -652,6 +658,18 @@ async def update_settings(request: Request, data: dict):
             chat_id_pool._target = int(data["chat_id_pool_target"])
         if "chat_id_pool_ttl_seconds" in data:
             chat_id_pool._ttl = float(data["chat_id_pool_ttl_seconds"])
+
+    # 预热模型列表更新 + 持久化
+    if "chat_id_pool_prewarm_models" in data:
+        new_models = data["chat_id_pool_prewarm_models"]
+        if isinstance(new_models, list) and all(isinstance(m, str) for m in new_models):
+            from backend.core.config import load_prewarm_config, save_prewarm_config
+            prewarm_cfg = load_prewarm_config()
+            prewarm_cfg["prewarm_models"] = new_models
+            save_prewarm_config(prewarm_cfg)
+            # 运行时更新 chat_id_pool 实例
+            if chat_id_pool:
+                chat_id_pool._prewarm_models = new_models
 
     # global_max_inflight 更新（如果配置中存在）
     if "global_max_inflight" in data and hasattr(settings, "GLOBAL_MAX_INFLIGHT"):

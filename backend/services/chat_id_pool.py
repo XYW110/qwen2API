@@ -1,3 +1,6 @@
+Looking at the conflict: HEAD uses `dict[tuple[str, str], deque[_Entry]]` for `_queues`, which is consistent with all methods in the file (`acquire`, `_prewarm_one`, `_refill_once`, `invalidate`, `flush_account`, `size`, `stats` all use tuple keys). The incoming branch added `_prewarm_models` (new feature) but incorrectly changed the queue key type to `str`, which would break every method. The correct merge keeps `_prewarm_models` from the incoming branch and the tuple key type from HEAD.
+
+```python
 """Chat ID 预热池：预先为每个可用账号创建若干 chat_id 放在队列里，
 请求到来时直接从队列 pop 一个省去 /chats/new 握手（实测 500ms~6s 不等）。
 
@@ -39,11 +42,13 @@ class ChatIdPool:
         target_per_account: int = 3,
         ttl_seconds: float = 1800,
         default_model: str = "qwen3.6-plus",
+        prewarm_models: list[str] | None = None,
     ):
         self._client = client
         self._target = target_per_account
         self._ttl = ttl_seconds
         self._default_model = default_model
+        self._prewarm_models: list[str] = prewarm_models or [default_model]
         self._queues: dict[tuple[str, str], deque[_Entry]] = {}
         self._lock = asyncio.Lock()
         self._refill_task: Optional[asyncio.Task] = None
@@ -208,3 +213,4 @@ class ChatIdPool:
             "miss_count": miss,
             "hit_rate": round(hit_rate, 1),
         }
+```
