@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     ADMIN_KEY: str = os.getenv("ADMIN_KEY", "admin")
 
     MAX_INFLIGHT_PER_ACCOUNT: int = int(os.getenv("MAX_INFLIGHT", 1))
+    GLOBAL_MAX_INFLIGHT: int = int(os.getenv("GLOBAL_MAX_INFLIGHT", 0))
 
     # 容灾与限流
     MAX_RETRIES: int = 3

@@ -819,3 +819,13 @@ async def reject_pending_account(id: str, request: Request):
     log.info(f"[审批] 已拒绝账户: {email}")
     
     return {"ok": True, "message": f"账户 {email} 已拒绝"}
+
+@router.get("/metrics", dependencies=[Depends(verify_admin)])
+async def get_metrics():
+    """获取全局请求指标快照和时序数据"""
+    from backend.core.global_metrics import metrics
+    return {
+        "snapshot": metrics.get_snapshot(),
+        "time_series": metrics.get_time_series(),
+        "token_time_series": metrics.get_token_time_series(),
+    }

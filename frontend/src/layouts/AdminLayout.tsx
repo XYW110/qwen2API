@@ -3,7 +3,7 @@ import {
   Activity,
   Key,
   Settings,
-  LayoutDashboard,
+  BarChart3,
   MessageSquare,
   Menu,
   X,
@@ -18,7 +18,7 @@ export default function AdminLayout() {
   const [mobileOpen, setMobileOpen] = useState(false);
 
   const navs = [
-    { name: "运行状态", path: "/", icon: LayoutDashboard },
+    { name: "指标分析", path: "/", icon: BarChart3 },
     { name: "账号管理", path: "/accounts", icon: Activity },
     { name: "待审批", path: "/pending-accounts", icon: Clock },
     { name: "API Key", path: "/tokens", icon: Key },
@@ -66,8 +66,7 @@ export default function AdminLayout() {
                   active
                     ? "bg-primary/10 text-primary shadow-[inset_0_1px_0_0_rgba(0,0,0,0.05)] dark:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.1)] ring-1 ring-primary/20"
                     : "text-muted-foreground hover:bg-black/5 dark:hover:bg-white/5 hover:text-foreground"
-                }`}
-              >
+                }`}>
                 <n.icon
                   className={`h-4 w-4 ${
                     active ? "drop-shadow-[0_0_8px_rgba(168,85,247,0.5)]" : ""

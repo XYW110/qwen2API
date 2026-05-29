@@ -181,6 +181,19 @@ def _fire_and_forget_stats(
 ) -> None:
     """Async stats writing via stats_store; never blocks or raises."""
     try:
+        # 记录到 GlobalMetrics
+        try:
+            from backend.core.global_metrics import metrics
+            prompt_tokens = usage.get("prompt_tokens", 0)
+            completion_tokens = usage.get("completion_tokens", 0)
+            metrics.record_tokens(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                model=model_name,
+            )
+        except Exception:
+            pass  # fire-and-forget: 不影响请求处理
+
         stats_store = getattr(client.account_pool, 'stats_store', None)
         if not stats_store or not execution.acc:
             return

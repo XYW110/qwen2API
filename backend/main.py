@@ -1,8 +1,10 @@
 import asyncio
 import faulthandler
+import json
 import logging
 import signal
 import sys
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -142,6 +144,36 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def metrics_middleware(request, call_next):
+    """请求指标记录中间件：仅记录业务 API 路径，忽略管理端点和静态资源"""
+    path = request.url.path
+    # 只记录业务 API（/v1/），排除管理端点（/api/admin/）、静态资源、健康检查、docs 等
+    if not path.startswith("/v1/"):
+        return await call_next(request)
+
+    # ⚠️ 必须在 call_next 之前读取 body，否则下游消费后无法再读
+    model = ""
+    try:
+        body = await request.body()
+        if body:
+            req_data = json.loads(body)
+            model = req_data.get("model", "")
+    except (json.JSONDecodeError, Exception):
+        pass
+
+    start = time.time()
+    response = await call_next(request)
+    duration = time.time() - start
+
+    # 记录到全局指标
+    from backend.core.global_metrics import metrics
+    metrics.record_request(duration, response.status_code, model)
+
+    return response
+
 
 # 挂载路由
 app.include_router(v1_chat.router, tags=["OpenAI Compatible"])

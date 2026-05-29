@@ -48,6 +48,8 @@ class ChatIdPool:
         self._lock = asyncio.Lock()
         self._refill_task: Optional[asyncio.Task] = None
         self._shutdown = False
+        self._hit_count = 0
+        self._miss_count = 0
 
     @property
     def target(self) -> int:
@@ -82,18 +84,22 @@ class ChatIdPool:
     async def acquire(self, email: str, model: str | None = None) -> Optional[str]:
         """优先从预热池取 chat_id；池空或过期则返回 None（调用方走同步 create_chat）。"""
         if not email:
+            self._miss_count += 1
             return None
         async with self._lock:
             q = self._queues.get(email)
             if not q:
+                self._miss_count += 1
                 return None
             now = time.time()
             while q:
                 entry = q.popleft()
                 if now - entry.created_at < self._ttl:
                     log.debug(f"[ChatIdPool] HIT email={email} chat_id={entry.chat_id}")
+                    self._hit_count += 1
                     return entry.chat_id
                 log.debug(f"[ChatIdPool] expired chat_id={entry.chat_id} email={email}")
+        self._miss_count += 1
         return None
 
     async def _prewarm_one(self, account, model: str) -> None:
@@ -184,9 +190,16 @@ class ChatIdPool:
         async with self._lock:
             per_account = {email: len(q) for email, q in self._queues.items()}
             total = sum(per_account.values())
+            hit = self._hit_count
+            miss = self._miss_count
+        total_acquires = hit + miss
+        hit_rate = (hit / total_acquires * 100) if total_acquires > 0 else 0.0
         return {
             "total_cached": total,
             "target_per_account": self._target,
             "ttl_seconds": self._ttl,
             "per_account": per_account,
+            "hit_count": hit,
+            "miss_count": miss,
+            "hit_rate": round(hit_rate, 1),
         }
