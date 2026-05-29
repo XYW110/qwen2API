@@ -59,6 +59,7 @@ class Settings(BaseSettings):
 
     # 预热模型列表
     CHAT_ID_POOL_PREWARM_MODELS: List[str] = ["qwen3.6-plus"]
+    MAX_TOTAL_PREWARM_CHAT_IDS: int = 100
 
     # ????? / ????
     CONTEXT_INLINE_MAX_CHARS: int = int(os.getenv("CONTEXT_INLINE_MAX_CHARS", 4000))
@@ -252,6 +253,7 @@ def load_prewarm_config() -> dict:
         "version": 1,
         "prewarm_models": list(settings.CHAT_ID_POOL_PREWARM_MODELS),
         "target_per_model": 3,
+        "max_total_prewarm": settings.MAX_TOTAL_PREWARM_CHAT_IDS,
     }
     try:
         if PREWARM_CONFIG_FILE.exists():
