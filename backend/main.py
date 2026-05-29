@@ -124,6 +124,7 @@ async def lifespan(app: FastAPI):
             target_per_account=prewarm_cfg.get("target_per_model", 3),
         )
         await chat_id_pool.start()
+        chat_id_pool._max_total_prewarm = prewarm_cfg.get("max_total_prewarm", settings.MAX_TOTAL_PREWARM_CHAT_IDS)
         app.state.chat_id_pool = chat_id_pool
         app.state.qwen_executor.chat_id_pool = chat_id_pool
 

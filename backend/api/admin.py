@@ -634,6 +634,7 @@ async def get_settings(request: Request):
         "chat_id_pool_target": chat_id_pool_target,
         "chat_id_pool_ttl_seconds": chat_id_pool_ttl_seconds,
         "chat_id_pool_prewarm_models": chat_id_pool_prewarm_models,
+        "chat_id_pool_max_total_prewarm": getattr(chat_id_pool, "_max_total_prewarm", 100),
     }
 
 @router.put("/settings", dependencies=[Depends(verify_admin)])
@@ -671,7 +672,20 @@ async def update_settings(request: Request, data: dict):
             if chat_id_pool:
                 chat_id_pool._prewarm_models = new_models
 
-    # global_max_inflight 更新（如果配置中存在）
+    # 预热总数上限更新 + 持久化
+    if "chat_id_pool_max_total_prewarm" in data:
+        new_limit = int(data["chat_id_pool_max_total_prewarm"])
+        if new_limit < 1:
+            raise HTTPException(status_code=400, detail="max_total_prewarm must be >= 1")
+        if chat_id_pool:
+            chat_id_pool._max_total_prewarm = new_limit
+        # 持久化
+        from backend.core.config import load_prewarm_config, save_prewarm_config
+        prewarm_cfg = load_prewarm_config()
+        prewarm_cfg["max_total_prewarm"] = new_limit
+        save_prewarm_config(prewarm_cfg)
+
+    # global_max_inflight 更新
     if "global_max_inflight" in data and hasattr(settings, "GLOBAL_MAX_INFLIGHT"):
         settings.GLOBAL_MAX_INFLIGHT = data["global_max_inflight"]
 
