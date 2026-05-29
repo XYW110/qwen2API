@@ -55,6 +55,10 @@ class ChatIdPool:
         self._shutdown = False
         self._hit_count = 0
         self._miss_count = 0
+        self._model_failure_counts: dict[str, int] = {}  # model -> 连续失败次数
+        self.MAX_CONSECUTIVE_FAILURES = 3
+        self._last_config_mtime: float = 0.0
+        self._max_total_prewarm: int = 100
 
     @property
     def target(self) -> int:
@@ -63,6 +67,10 @@ class ChatIdPool:
     @property
     def ttl(self) -> float:
         return self._ttl
+
+    @property
+    def max_total_prewarm(self) -> int:
+        return self._max_total_prewarm
 
     def update_config(self, *, target: int | None = None, ttl_seconds: float | None = None) -> None:
         """运行时热更新参数。"""
@@ -122,7 +130,9 @@ class ChatIdPool:
                 q = self._queues.setdefault(key, deque())
                 q.append(_Entry(chat_id))
             log.info(f"[ChatIdPool] prewarmed key={key} chat_id={chat_id} pool_size={len(q)}")
+            self._model_failure_counts.pop(model, None)
         except Exception as e:
+            self._model_failure_counts[model] = self._model_failure_counts.get(model, 0) + 1
             err = str(e) or type(e).__name__
             log.warning(f"[ChatIdPool] prewarm failed email={getattr(account, 'email', '?')}: {err}")
 
@@ -138,8 +148,28 @@ class ChatIdPool:
                 log.warning(f"[ChatIdPool] refill error: {e}")
             await asyncio.sleep(interval)
 
+    async def _reload_config(self) -> None:
+        """检查配置文件是否更新，若有变化则重新加载 prewarm_models。"""
+        try:
+            from backend.core.config import load_prewarm_config, PREWARM_CONFIG_FILE
+            if not PREWARM_CONFIG_FILE.exists():
+                return
+            mtime = PREWARM_CONFIG_FILE.stat().st_mtime
+            if mtime <= self._last_config_mtime:
+                return
+            self._last_config_mtime = mtime
+            cfg = load_prewarm_config()
+            new_models = cfg.get("prewarm_models", [])
+            if new_models and set(new_models) != set(self._prewarm_models):
+                old = set(self._prewarm_models)
+                self._prewarm_models = new_models
+                log.info(f"[ChatIdPool] config reloaded: prewarm_models {old} -> {set(new_models)}")
+        except Exception as e:
+            log.warning(f"[ChatIdPool] config reload failed: {e}")
+
     async def _refill_once(self) -> None:
         """遍历账号池里所有 valid 账号，每个不足 target 就补位。"""
+        await self._reload_config()
         pool = getattr(self._client, "account_pool", None)
         if pool is None:
             return
@@ -150,12 +180,22 @@ class ChatIdPool:
             if getattr(a, "token", "") and getattr(a, "status_code", "valid") == "valid"
         ]
         for acc in valid:
+            # 检查预热总数上限
             async with self._lock:
-                q_size = len(self._queues.get((acc.email, self._default_model), []))
-            deficit = self._target - q_size
-            # 每轮每账号最多补 1 个，避免突发 API 压力
-            if deficit > 0:
-                await self._prewarm_one(acc, self._default_model)
+                current_total = sum(len(q) for q in self._queues.values())
+            if current_total >= self._max_total_prewarm:
+                log.debug(f"[ChatIdPool] total prewarm {current_total} >= limit {self._max_total_prewarm}, skip refill")
+                return
+            for model in self._prewarm_models:
+                # 跳过连续失败过多的模型
+                if self._model_failure_counts.get(model, 0) >= self.MAX_CONSECUTIVE_FAILURES:
+                    continue
+                async with self._lock:
+                    q_size = len(self._queues.get((acc.email, model), []))
+                deficit = self._target - q_size
+                # 每轮每账号每模型最多补 1 个，避免突发 API 压力
+                if deficit > 0:
+                    await self._prewarm_one(acc, model)
 
     async def invalidate(self, email: str, chat_id: str) -> None:
         """遍历该 email 所有模型队列，移除匹配的 chat_id。"""
