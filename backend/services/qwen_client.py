@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 from typing import AsyncIterator
 
 import httpx
@@ -19,6 +20,11 @@ class QwenClient:
         self.account_pool = account_pool
         self.auth_resolver = AuthResolver(account_pool) if account_pool is not None else None
         self.executor = QwenExecutor(self, account_pool)
+
+        # list_models 结果缓存（60 分钟 TTL）
+        self._models_cache: list = []
+        self._models_cache_ts: float = 0
+        self._models_cache_ttl: float = 3600  # 60 分钟
 
     @staticmethod
     def _build_headers(token: str) -> dict[str, str]:
@@ -146,34 +152,39 @@ class QwenClient:
             log.warning(f"[verify_token] HTTP 请求异常: {e}")
             return False
 
-    async def list_models(self, account= None) -> list:
-        """获取模型列表，优先使用 cookies，如果没有则使用 token"""
+    async def list_models(self, account=None) -> list:
+        """获取模型列表（带 60 分钟缓存），优先使用 cookies，没有则用 token"""
+        now = time.time()
+        # 缓存命中：有缓存且未过期
+        if self._models_cache and (now - self._models_cache_ts) < self._models_cache_ttl:
+            return self._models_cache
+
         try:
-            # 尝试从 account 获取 cookies
             cookies = getattr(account, 'cookies', None) if account else None
-            
-            # 优先使用 cookies，如果没有 cookies 则使用 token
             if cookies:
                 headers = self._build_headers_with_cookies(cookies)
             elif account and account.token:
                 headers = self._build_headers(account.token)
             else:
-                return []
-            
+                return self._models_cache  # 无凭据时返回缓存（可能为空）
+
             async with httpx.AsyncClient(timeout=10) as hc:
                 resp = await hc.get(
                     f"{BASE_URL}/api/models",
                     headers=headers,
                 )
-            
+
             if resp.status_code != 200:
-                return []
-            
+                return self._models_cache  # 失败时返回缓存
+
             result = resp.json()
             models = result.get("data", [])
+            # 更新缓存
+            self._models_cache = models
+            self._models_cache_ts = now
             return models
         except Exception:
-            return []
+            return self._models_cache  # 异常时返回缓存
 
     def _build_payload(self, chat_id: str, model: str, content: str, has_custom_tools: bool = False, files: list[dict] | None = None) -> dict:
         return build_chat_payload(chat_id, model, content, has_custom_tools, files=files)

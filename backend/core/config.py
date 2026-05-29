@@ -2,7 +2,7 @@ import os
 import json
 from pathlib import Path
 from pydantic_settings import BaseSettings
-from typing import Dict, Set, Optional
+from typing import Dict, List, Set, Optional
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 DATA_DIR = BASE_DIR / "data"
@@ -56,6 +56,9 @@ class Settings(BaseSettings):
     USERS_FILE: str = os.getenv("USERS_FILE", str(DATA_DIR / "users.json"))
     CAPTURES_FILE: str = os.getenv("CAPTURES_FILE", str(DATA_DIR / "captures.json"))
     CONFIG_FILE: str = os.getenv("CONFIG_FILE", str(DATA_DIR / "config.json"))
+
+    # 预热模型列表
+    CHAT_ID_POOL_PREWARM_MODELS: List[str] = ["qwen3.6-plus"]
 
     # ????? / ????
     CONTEXT_INLINE_MAX_CHARS: int = int(os.getenv("CONTEXT_INLINE_MAX_CHARS", 4000))
@@ -237,3 +240,36 @@ def resolve_request_model(
     ):
         return resolve_qwen_code_model(requested_model)
     return resolve_model(requested_model)
+
+
+# ============== 预热配置持久化 ==============
+PREWARM_CONFIG_FILE = DATA_DIR / "prewarm_config.json"
+
+
+def load_prewarm_config() -> dict:
+    """从 data/prewarm_config.json 加载预热配置，文件不存在时返回默认值。"""
+    default = {
+        "version": 1,
+        "prewarm_models": list(settings.CHAT_ID_POOL_PREWARM_MODELS),
+        "target_per_model": 3,
+    }
+    try:
+        if PREWARM_CONFIG_FILE.exists():
+            with open(PREWARM_CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            # 校验基本结构
+            if isinstance(data.get("prewarm_models"), list):
+                return data
+    except Exception:
+        pass
+    return default
+
+
+def save_prewarm_config(config: dict) -> None:
+    """将预热配置持久化到 data/prewarm_config.json。"""
+    try:
+        PREWARM_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(PREWARM_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass

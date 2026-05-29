@@ -39,11 +39,13 @@ class ChatIdPool:
         target_per_account: int = 3,
         ttl_seconds: float = 1800,
         default_model: str = "qwen3.6-plus",
+        prewarm_models: list[str] | None = None,
     ):
         self._client = client
         self._target = target_per_account
         self._ttl = ttl_seconds
         self._default_model = default_model
+        self._prewarm_models: list[str] = prewarm_models or [default_model]
         self._queues: dict[str, deque[_Entry]] = {}
         self._lock = asyncio.Lock()
         self._refill_task: Optional[asyncio.Task] = None

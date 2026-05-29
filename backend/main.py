@@ -116,7 +116,13 @@ async def lifespan(app: FastAPI):
 
         # 初始化 ChatIdPool 预热池（减少每次请求的握手时延）
         from backend.services.chat_id_pool import ChatIdPool
-        chat_id_pool = ChatIdPool(app.state.qwen_client)
+        from backend.core.config import load_prewarm_config
+        prewarm_cfg = load_prewarm_config()
+        chat_id_pool = ChatIdPool(
+            app.state.qwen_client,
+            prewarm_models=prewarm_cfg.get("prewarm_models", settings.CHAT_ID_POOL_PREWARM_MODELS),
+            target_per_account=prewarm_cfg.get("target_per_model", 3),
+        )
         await chat_id_pool.start()
         app.state.chat_id_pool = chat_id_pool
         app.state.qwen_executor.chat_id_pool = chat_id_pool
