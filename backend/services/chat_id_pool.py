@@ -6,7 +6,7 @@
 工作流：
   - 服务启动 → 每账号预建 target_per_account 个 chat_id
   - 请求用掉一个 chat_id → 后台立即补位一个
-  - 每账号池大小上限：target_per_account (默认 5)
+  - 每账号池大小上限：target_per_account (默认 3)
   - chat_id 有 TTL (默认 10 分钟)，超时背景任务丢弃+重建
   - 请求取不到预热 chat_id 时：fallback 到同步 create_chat（当前行为）
 """
@@ -38,7 +38,7 @@ class ChatIdPool:
         client,
         *,
         target_per_account: int = 3,
-        ttl_seconds: float = 1800,
+        ttl_seconds: float = 10,
         prewarm_models: list[str] | None = None,
     ):
         self._client = client
@@ -55,7 +55,7 @@ class ChatIdPool:
         self._model_failure_counts: dict[str, int] = {}  # model -> 连续失败次数
         self.MAX_CONSECUTIVE_FAILURES = 3
         self._last_config_mtime: float = 0.0
-        self._max_total_prewarm: int = 100
+        self._max_total_prewarm: int = 10
 
     @property
     def target(self) -> int:

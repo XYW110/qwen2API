@@ -15,13 +15,13 @@ import { API_BASE } from "../lib/api";
 export default function SettingsPage() {
   const [settings, setSettings] = useState<any>(null);
   const [sessionKey, setSessionKey] = useState("");
-  const [maxInflight, setMaxInflight] = useState(4);
-  const [globalMaxInflight, setGlobalMaxInflight] = useState(0);
-  const [poolTarget, setPoolTarget] = useState(5);
-  const [poolTtlMin, setPoolTtlMin] = useState(10);
+  const [maxInflight, setMaxInflight] = useState<number | "">("");
+  const [globalMaxInflight, setGlobalMaxInflight] = useState<number | "">("");
+  const [poolTarget, setPoolTarget] = useState<number | "">("");
+  const [poolTtlMin, setPoolTtlMin] = useState<number | "">("");
   const [prewarmModels, setPrewarmModels] = useState("");
   const [modelAliases, setModelAliases] = useState("");
-  const [maxTotalPrewarm, setMaxTotalPrewarm] = useState(100);
+  const [maxTotalPrewarm, setMaxTotalPrewarm] = useState<number | "">("");
 
   const loadSessionKey = () => {
     setSessionKey(localStorage.getItem("qwen2api_key") || "");
@@ -35,13 +35,22 @@ export default function SettingsPage() {
       })
       .then((data) => {
         setSettings(data);
-        setMaxInflight(data.max_inflight_per_account || 4);
-        setGlobalMaxInflight(data.global_max_inflight || 0);
-        setPoolTarget(data.chat_id_pool_target || 5);
-        setPoolTtlMin(Math.round((data.chat_id_pool_ttl_seconds || 600) / 60));
-        setPrewarmModels((data.chat_id_pool_prewarm_models || []).join(", "));
-        setModelAliases(JSON.stringify(data.model_aliases || {}, null, 2));
-        setMaxTotalPrewarm(data.chat_id_pool_max_total_prewarm ?? 100);
+        // 只有后端返回有效值时才设置，否则保持空
+        if (data.max_inflight_per_account != null)
+          setMaxInflight(data.max_inflight_per_account);
+        if (data.global_max_inflight != null)
+          setGlobalMaxInflight(data.global_max_inflight);
+        if (data.chat_id_pool_target != null)
+          setPoolTarget(data.chat_id_pool_target);
+        if (data.chat_id_pool_ttl_seconds != null)
+          setPoolTtlMin(Math.round(data.chat_id_pool_ttl_seconds / 60));
+        if (data.chat_id_pool_prewarm_models)
+          setPrewarmModels(data.chat_id_pool_prewarm_models.join(", "));
+        if (data.model_aliases && Object.keys(data.model_aliases).length > 0) {
+          setModelAliases(JSON.stringify(data.model_aliases, null, 2));
+        }
+        if (data.chat_id_pool_max_total_prewarm != null)
+          setMaxTotalPrewarm(data.chat_id_pool_max_total_prewarm);
       })
       .catch(() => toast.error("配置获取失败，请检查会话 Key"));
   };
@@ -68,6 +77,19 @@ export default function SettingsPage() {
   };
 
   const handleSaveConcurrency = () => {
+    // 校验数据
+    if (maxInflight === "" || maxInflight < 1 || maxInflight > 10) {
+      toast.error("单账号最大并发必须为 1-10 之间的整数");
+      return;
+    }
+    if (
+      globalMaxInflight === "" ||
+      globalMaxInflight < 0 ||
+      globalMaxInflight > 200
+    ) {
+      toast.error("全局并发上限必须为 0-200 之间的整数");
+      return;
+    }
     fetch(`${API_BASE}/api/admin/settings`, {
       method: "PUT",
       headers: { "Content-Type": "application/json", ...getAuthHeader() },
@@ -84,6 +106,23 @@ export default function SettingsPage() {
   };
 
   const handleSavePool = () => {
+    // 校验数据
+    if (poolTarget === "" || poolTarget < 0 || poolTarget > 20) {
+      toast.error("每账号目标数必须为 0-20 之间的整数");
+      return;
+    }
+    if (poolTtlMin === "" || poolTtlMin < 1 || poolTtlMin > 120) {
+      toast.error("TTL 必须为 1-120 之间的整数（分钟）");
+      return;
+    }
+    if (
+      maxTotalPrewarm === "" ||
+      maxTotalPrewarm < 1 ||
+      maxTotalPrewarm > 1000
+    ) {
+      toast.error("预热总数上限必须为 1-1000 之间的整数");
+      return;
+    }
     const parsedModels = prewarmModels
       .split(",")
       .map((m) => m.trim())
@@ -108,6 +147,14 @@ export default function SettingsPage() {
   const handleSaveAliases = () => {
     try {
       const parsed = JSON.parse(modelAliases);
+      if (
+        typeof parsed !== "object" ||
+        parsed === null ||
+        Array.isArray(parsed)
+      ) {
+        toast.error('映射规则必须为 JSON 对象格式，如 {"model1": "model2"}');
+        return;
+      }
       fetch(`${API_BASE}/api/admin/settings`, {
         method: "PUT",
         headers: { "Content-Type": "application/json", ...getAuthHeader() },
