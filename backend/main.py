@@ -160,6 +160,15 @@ async def metrics_middleware(request, call_next):
     # 只记录业务 API（/v1/），排除管理端点（/api/admin/）、静态资源、健康检查、docs 等
     if not path.startswith("/v1/"):
         return await call_next(request)
+    
+    # 请求体大小限制（防止超大 JSON 导致内存/CPU 峰值）
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > settings.REQUEST_MAX_BODY_BYTES:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=413,
+            content={"detail": f"Request body too large. Max {settings.REQUEST_MAX_BODY_BYTES // (1024*1024)}MB"}
+        )
 
     # ⚠️ 必须在 call_next 之前读取 body，否则下游消费后无法再读
     model = ""

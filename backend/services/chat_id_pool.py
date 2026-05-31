@@ -56,6 +56,12 @@ class ChatIdPool:
         self.MAX_CONSECUTIVE_FAILURES = 3
         self._last_config_mtime: float = 0.0
         self._max_total_prewarm: int = 10
+        
+        # 全局失败熔断机制（防止上游异常时频繁重试）
+        self._global_failure_count: int = 0
+        self._global_failure_cooldown_until: float = 0.0
+        self.GLOBAL_FAILURE_THRESHOLD: int = 10  # 连续失败次数阈值
+        self.GLOBAL_FAILURE_COOLDOWN_SECONDS: float = 60.0  # 冷却时间（秒）
 
     @property
     def target(self) -> int:
@@ -133,8 +139,16 @@ class ChatIdPool:
                 q.append(_Entry(chat_id))
             log.info(f"[ChatIdPool] prewarmed key={key} chat_id={chat_id} pool_size={len(q)}")
             self._model_failure_counts.pop(model, None)
+            # 成功时重置全局失败计数
+            self._global_failure_count = 0
         except Exception as e:
             self._model_failure_counts[model] = self._model_failure_counts.get(model, 0) + 1
+            # 累加全局失败计数，触发熔断检查
+            self._global_failure_count += 1
+            if self._global_failure_count >= self.GLOBAL_FAILURE_THRESHOLD:
+                import time as _time
+                self._global_failure_cooldown_until = _time.time() + self.GLOBAL_FAILURE_COOLDOWN_SECONDS
+                log.warning(f"[ChatIdPool] global failure threshold reached ({self._global_failure_count}), cooling down for {self.GLOBAL_FAILURE_COOLDOWN_SECONDS}s")
             err = str(e) or type(e).__name__
             log.warning(f"[ChatIdPool] prewarm failed email={getattr(account, 'email', '?')}: {err}")
 
@@ -173,6 +187,14 @@ class ChatIdPool:
         """遍历账号池里所有 valid 账号，每账号总计不足 target 则随机选模型补位。"""
         if not self._prewarm_models:
             return
+        
+        # 全局失败熔断检查
+        import time as _time
+        if self._global_failure_cooldown_until > 0 and _time.time() < self._global_failure_cooldown_until:
+            remaining = self._global_failure_cooldown_until - _time.time()
+            log.debug(f"[ChatIdPool] in cooldown period, {remaining:.1f}s remaining")
+            return
+        
         await self._reload_config()
         # 过滤掉连续失败过多的模型
         available_models = [

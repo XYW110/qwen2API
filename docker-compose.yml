@@ -3,6 +3,11 @@ services:
     image: softs2005/qwen2api:latest
     container_name: qwen2api
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     env_file:
       - path: .env
         required: false
@@ -22,7 +27,11 @@ services:
       LOG_LEVEL: "INFO"
       DIAGNOSTIC_STACK_DUMP_ENABLED: "true"
     healthcheck:
-      test: ["CMD-SHELL", "curl --max-time 5 -fsS http://localhost:7860/healthz || exit 1"]
+      test:
+        [
+          "CMD-SHELL",
+          "curl --max-time 5 -fsS http://localhost:7860/healthz || exit 1",
+        ]
       interval: 30s
       timeout: 10s
       start_period: 120s
