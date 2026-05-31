@@ -170,14 +170,18 @@ async def metrics_middleware(request, call_next):
             content={"detail": f"Request body too large. Max {settings.REQUEST_MAX_BODY_BYTES // (1024*1024)}MB"}
         )
 
-    # ⚠️ 必须在 call_next 之前读取 body，否则下游消费后无法再读
+    # 轻量提取 model 字段：读取完整 body（Starlette 会缓存供路由再用），
+    # 但只对前 2KB 做正则扫描提取 model，避免对 100KB+ body 做 json.loads（CPU 密集型）
     model = ""
     try:
+        import re as _re
         body = await request.body()
         if body:
-            req_data = json.loads(body)
-            model = req_data.get("model", "")
-    except (json.JSONDecodeError, Exception):
+            head = body[:2048]
+            m = _re.search(rb'"model"\s*:\s*"([^"]+)"', head)
+            if m:
+                model = m.group(1).decode("utf-8", errors="ignore")
+    except Exception:
         pass
 
     start = time.time()

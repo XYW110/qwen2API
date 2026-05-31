@@ -1,3 +1,4 @@
+import functools
 import json
 import logging
 from typing import Any
@@ -13,15 +14,23 @@ except Exception as e:
     log.warning(f"Failed to load tiktoken: {e}")
     encoder = None
 
+
+@functools.lru_cache(maxsize=256)
+def _encode_cached(text: str) -> int:
+    """缓存 tiktoken.encode 结果，避免同一文本重复 BPE 分词（CPU 密集型）。"""
+    if encoder:
+        return len(encoder.encode(text))
+    return max(1, len(text.encode('utf-8')) // 2)
+
+
 def count_tokens(text: str) -> int:
-    """计算文本的精确 Token 数"""
+    """计算文本的精确 Token 数（结果有 LRU 缓存）。"""
     if not text:
         return 0
-    if encoder:
-        try:
-            return len(encoder.encode(text))
-        except Exception:
-            pass
+    try:
+        return _encode_cached(text)
+    except Exception:
+        pass
     # Fallback：每汉字 1 token，每 3 个英文字母 1 token 的粗略估算
     return max(1, len(text.encode('utf-8')) // 2)
 
