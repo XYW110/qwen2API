@@ -7,11 +7,18 @@ import sys
 import time
 from contextlib import asynccontextmanager
 
+import re as _re
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from backend.core.global_metrics import metrics as global_metrics
 import os
 import sys
+
+# 预编译正则：从请求 body 前 2KB 提取 model 字段
+_MODEL_PATTERN = _re.compile(rb'"model"\s*:\s*"([^"]+)"')
 
 # 将项目根目录加入到 sys.path，解决直接运行 main.py 时找不到 backend 模块的问题
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -164,7 +171,6 @@ async def metrics_middleware(request, call_next):
     # 请求体大小限制（防止超大 JSON 导致内存/CPU 峰值）
     content_length = request.headers.get("content-length")
     if content_length and int(content_length) > settings.REQUEST_MAX_BODY_BYTES:
-        from fastapi.responses import JSONResponse
         return JSONResponse(
             status_code=413,
             content={"detail": f"Request body too large. Max {settings.REQUEST_MAX_BODY_BYTES // (1024*1024)}MB"}
@@ -174,11 +180,9 @@ async def metrics_middleware(request, call_next):
     # 但只对前 2KB 做正则扫描提取 model，避免对 100KB+ body 做 json.loads（CPU 密集型）
     model = ""
     try:
-        import re as _re
         body = await request.body()
         if body:
-            head = body[:2048]
-            m = _re.search(rb'"model"\s*:\s*"([^"]+)"', head)
+            m = _MODEL_PATTERN.search(body[:2048])
             if m:
                 model = m.group(1).decode("utf-8", errors="ignore")
     except Exception:
@@ -189,8 +193,7 @@ async def metrics_middleware(request, call_next):
     duration = time.time() - start
 
     # 记录到全局指标
-    from backend.core.global_metrics import metrics
-    metrics.record_request(duration, response.status_code, model)
+    global_metrics.record_request(duration, response.status_code, model)
 
     return response
 
