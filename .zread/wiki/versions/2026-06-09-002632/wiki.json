@@ -1,0 +1,279 @@
+{
+  "id": "2026-06-09-002632",
+  "generated_at": "2026-06-08T16:26:32.2363796Z",
+  "language": "zh",
+  "pages": [
+    {
+      "slug": "1-xiang-mu-gai-lan-qwen2apiqi-ye-wang-guan",
+      "title": "项目概览：qwen2API企业网关",
+      "file": "1-xiang-mu-gai-lan-qwen2apiqi-ye-wang-guan.md",
+      "section": "入门指南",
+      "level": "Beginner"
+    },
+    {
+      "slug": "2-kuai-su-kai-shi-docker-jian-bu-shu",
+      "title": "快速开始：Docker一键部署",
+      "file": "2-kuai-su-kai-shi-docker-jian-bu-shu.md",
+      "section": "入门指南",
+      "level": "Beginner"
+    },
+    {
+      "slug": "3-kuai-su-kai-shi-ben-di-yuan-ma-yun-xing",
+      "title": "快速开始：本地源码运行",
+      "file": "3-kuai-su-kai-shi-ben-di-yuan-ma-yun-xing.md",
+      "section": "入门指南",
+      "level": "Beginner"
+    },
+    {
+      "slug": "4-huan-jing-bian-liang-yu-pei-zhi-xiang-jie",
+      "title": "环境变量与配置详解",
+      "file": "4-huan-jing-bian-liang-yu-pei-zhi-xiang-jie.md",
+      "section": "入门指南",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "5-jia-gou-zong-lan-tong-wang-guan-yu-xie-yi-zhuan-huan",
+      "title": "架构总览：统一网关与协议转换",
+      "file": "5-jia-gou-zong-lan-tong-wang-guan-yu-xie-yi-zhuan-huan.md",
+      "section": "核心架构",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "6-openai-chat-completionsjie-kou-gua-pei",
+      "title": "OpenAI Chat Completions接口适配",
+      "file": "6-openai-chat-completionsjie-kou-gua-pei.md",
+      "section": "核心架构",
+      "group": "协议适配层",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "7-anthropic-messagesjie-kou-gua-pei",
+      "title": "Anthropic Messages接口适配",
+      "file": "7-anthropic-messagesjie-kou-gua-pei.md",
+      "section": "核心架构",
+      "group": "协议适配层",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "8-gemini-generatecontentjie-kou-gua-pei",
+      "title": "Gemini GenerateContent接口适配",
+      "file": "8-gemini-generatecontentjie-kou-gua-pei.md",
+      "section": "核心架构",
+      "group": "协议适配层",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "9-tu-pian-sheng-cheng-yu-wen-jian-jie-kou",
+      "title": "图片生成与文件接口",
+      "file": "9-tu-pian-sheng-cheng-yu-wen-jian-jie-kou.md",
+      "section": "核心架构",
+      "group": "协议适配层",
+      "level": "Beginner"
+    },
+    {
+      "slug": "10-zhang-hao-chi-bing-fa-kong-zhi-yu-xian-liu-leng-que",
+      "title": "账号池：并发控制与限流冷却",
+      "file": "10-zhang-hao-chi-bing-fa-kong-zhi-yu-xian-liu-leng-que.md",
+      "section": "核心架构",
+      "group": "运行时核心",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "11-hui-hua-guan-li-yu-chat-idyu-re-chi",
+      "title": "会话管理与Chat ID预热池",
+      "file": "11-hui-hua-guan-li-yu-chat-idyu-re-chi.md",
+      "section": "核心架构",
+      "group": "运行时核心",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "12-gong-ju-diao-yong-jie-xi-yin-qing-toolcore",
+      "title": "工具调用解析引擎（Toolcore）",
+      "file": "12-gong-ju-diao-yong-jie-xi-yin-qing-toolcore.md",
+      "section": "核心架构",
+      "group": "运行时核心",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "13-shang-xia-wen-huan-cun-yu-wen-jian-guan-li",
+      "title": "上下文缓存与文件管理",
+      "file": "13-shang-xia-wen-huan-cun-yu-wen-jian-guan-li.md",
+      "section": "核心架构",
+      "group": "运行时核心",
+      "level": "Advanced"
+    },
+    {
+      "slug": "14-hou-duan-ru-kou-yu-sheng-ming-zhou-qi-guan-li",
+      "title": "后端入口与生命周期管理",
+      "file": "14-hou-duan-ru-kou-yu-sheng-ming-zhou-qi-guan-li.md",
+      "section": "关键模块深度解析",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "15-pei-zhi-guan-li-settingsyu-mo-xing-ying-she",
+      "title": "配置管理：Settings与模型映射",
+      "file": "15-pei-zhi-guan-li-settingsyu-mo-xing-ying-she.md",
+      "section": "关键模块深度解析",
+      "group": "核心模块",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "16-zhang-hao-chi-yu-zhuang-tai-cun-chu",
+      "title": "账号池与状态存储",
+      "file": "16-zhang-hao-chi-yu-zhuang-tai-cun-chu.md",
+      "section": "关键模块深度解析",
+      "group": "核心模块",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "17-qwenke-hu-duan-yu-zhi-xing-yin-qing",
+      "title": "Qwen客户端与执行引擎",
+      "file": "17-qwenke-hu-duan-yu-zhi-xing-yin-qing.md",
+      "section": "关键模块深度解析",
+      "group": "核心模块",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "18-ren-zheng-yu-pei-e-guan-li",
+      "title": "认证与配额管理",
+      "file": "18-ren-zheng-yu-pei-e-guan-li.md",
+      "section": "关键模块深度解析",
+      "group": "核心模块",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "19-gong-ju-jie-xi-yu-yan-zheng",
+      "title": "工具解析与验证",
+      "file": "19-gong-ju-jie-xi-yu-yan-zheng.md",
+      "section": "关键模块深度解析",
+      "group": "服务层",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "20-xiang-ying-ge-shi-hua-yu-liu-shi-zhuan-huan",
+      "title": "响应格式化与流式转换",
+      "file": "20-xiang-ying-ge-shi-hua-yu-liu-shi-zhuan-huan.md",
+      "section": "关键模块深度解析",
+      "group": "服务层",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "21-fu-jian-yu-chu-li-yu-shang-xia-wen-guan-li",
+      "title": "附件预处理与上下文管理",
+      "file": "21-fu-jian-yu-chu-li-yu-shang-xia-wen-guan-li.md",
+      "section": "关键模块深度解析",
+      "group": "服务层",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "22-wen-jian-cun-chu-yu-shang-chuan",
+      "title": "文件存储与上传",
+      "file": "22-wen-jian-cun-chu-yu-shang-chuan.md",
+      "section": "关键模块深度解析",
+      "group": "服务层",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "23-toolcore-v2-zhi-ling-jie-xi-yu-ce-lue-zhi-xing",
+      "title": "Toolcore V2：指令解析与策略执行",
+      "file": "23-toolcore-v2-zhi-ling-jie-xi-yu-ce-lue-zhi-xing.md",
+      "section": "关键模块深度解析",
+      "group": "工具调用核心（Toolcore）",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "24-liu-shi-zhuang-tai-ji-yu-gong-ju-diao-yong-huan-jue-fang-hu",
+      "title": "流式状态机与工具调用幻觉防护",
+      "file": "24-liu-shi-zhuang-tai-ji-yu-gong-ju-diao-yong-huan-jue-fang-hu.md",
+      "section": "关键模块深度解析",
+      "group": "工具调用核心（Toolcore）",
+      "level": "Advanced"
+    },
+    {
+      "slug": "25-ti-shi-ci-gou-jian-yu-shang-xia-wen-xie-zai",
+      "title": "提示词构建与上下文卸载",
+      "file": "25-ti-shi-ci-gou-jian-yu-shang-xia-wen-xie-zai.md",
+      "section": "关键模块深度解析",
+      "group": "工具调用核心（Toolcore）",
+      "level": "Advanced"
+    },
+    {
+      "slug": "26-qing-qiu-gui-hua-yu-dan-ci-fei-xing-kong-zhi",
+      "title": "请求归一化与单次飞行控制",
+      "file": "26-qing-qiu-gui-hua-yu-dan-ci-fei-xing-kong-zhi.md",
+      "section": "关键模块深度解析",
+      "group": "工具调用核心（Toolcore）",
+      "level": "Advanced"
+    },
+    {
+      "slug": "27-webuiguan-li-tai-shi-yong",
+      "title": "WebUI管理台使用",
+      "file": "27-webuiguan-li-tai-shi-yong.md",
+      "section": "功能专题与运维",
+      "level": "Beginner"
+    },
+    {
+      "slug": "28-mo-xing-ying-she-yu-bie-ming-ce-lue",
+      "title": "模型映射与别名策略",
+      "file": "28-mo-xing-ying-she-yu-bie-ming-ce-lue.md",
+      "section": "功能专题与运维",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "29-dai-shen-pi-zhang-hu-ji-zhi-yu-an-quan-guan-kong",
+      "title": "待审批账户机制与安全管控",
+      "file": "29-dai-shen-pi-zhang-hu-ji-zhi-yu-an-quan-guan-kong.md",
+      "section": "功能专题与运维",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "30-tu-pian-sheng-cheng-lian-lu-yu-yi-tu-shi-bie",
+      "title": "图片生成链路与意图识别",
+      "file": "30-tu-pian-sheng-cheng-lian-lu-yu-yi-tu-shi-bie.md",
+      "section": "功能专题与运维",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "31-xing-neng-you-hua-huan-cun-yu-re-yu-liu-shi-chu-li",
+      "title": "性能优化：缓存、预热与流式处理",
+      "file": "31-xing-neng-you-hua-huan-cun-yu-re-yu-liu-shi-chu-li.md",
+      "section": "功能专题与运维",
+      "level": "Advanced"
+    },
+    {
+      "slug": "32-xian-liu-ce-lue-yu-cuo-wu-chu-li",
+      "title": "限流策略与错误处理",
+      "file": "32-xian-liu-ce-lue-yu-cuo-wu-chu-li.md",
+      "section": "功能专题与运维",
+      "level": "Advanced"
+    },
+    {
+      "slug": "33-jian-kang-jian-cha-yu-jiu-xu-tan-zhen",
+      "title": "健康检查与就绪探针",
+      "file": "33-jian-kang-jian-cha-yu-jiu-xu-tan-zhen.md",
+      "section": "功能专题与运维",
+      "level": "Beginner"
+    },
+    {
+      "slug": "34-ce-shi-ti-xi-gai-lan",
+      "title": "测试体系概览",
+      "file": "34-ce-shi-ti-xi-gai-lan.md",
+      "section": "测试与开发",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "35-he-xin-ce-shi-yong-li-jie-du",
+      "title": "核心测试用例解读",
+      "file": "35-he-xin-ce-shi-yong-li-jie-du.md",
+      "section": "测试与开发",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "36-kai-fa-huan-jing-da-jian-yu-diao-shi",
+      "title": "开发环境搭建与调试",
+      "file": "36-kai-fa-huan-jing-da-jian-yu-diao-shi.md",
+      "section": "测试与开发",
+      "level": "Beginner"
+    }
+  ]
+}
