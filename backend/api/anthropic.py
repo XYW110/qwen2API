@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from backend.adapter.standard_request import StandardRequest, enforce_declared_tool_choice
-from backend.core.config import resolve_model, settings
+from backend.core.config import resolve_model
 from backend.core.request_logging import new_request_id, request_context, update_request_context
 from backend.runtime import stream_presenter
 from backend.runtime.execution import (
@@ -20,12 +20,13 @@ from backend.runtime.execution import (
 )
 from backend.services.auth_quota import resolve_auth_context
 from backend.toolcore.stream_sieve import ToolStreamSieve
-from backend.services.context_attachment_manager import prepare_context_attachments, derive_session_key
+from backend.services.context_attachment_manager import derive_session_key, prepare_context_attachments
 from backend.services.attachment_preprocessor import preprocess_attachments
 from backend.services.client_profiles import CLAUDE_CODE_OPENAI_PROFILE
 from backend.toolcore.prompt_builder import messages_to_prompt
 from backend.services.response_formatters import _client_visible_tool_name, build_anthropic_message_payload
 from backend.services.qwen_client import QwenClient
+from backend.services.session_orchestrator import SessionOrchestrator
 from backend.services.token_calc import calculate_usage, count_tokens
 from backend.adapter.standard_request import normalize_tool_choice
 from backend.toolcore.request_normalizer import normalize_anthropic_request, to_prompt_payload
@@ -33,9 +34,8 @@ from backend.toolcore.task_session import (
     build_anthropic_assistant_history_message,
     build_retry_rebase_prompt,
     clear_invalidated_session_chat,
-    log_session_plan_reuse_cancelled,
-    persist_session_turn,
     plan_persistent_session_turn,
+    persist_session_turn,
 )
 from backend.services.completion_bridge import _fire_and_forget_stats, run_retryable_completion_bridge
 from backend.toolcall.normalize import build_tool_name_registry
@@ -148,8 +148,11 @@ def _build_standard_request(req_data: dict) -> StandardRequest:
     prompt = prompt_result.prompt
     tools = prompt_result.tools
     tool_names = [tool_name for tool_name in (tool.get("name") for tool in tools) if isinstance(tool_name, str) and tool_name]
-    tool_choice = normalize_tool_choice(normalized_payload.get("tool_choice"))
-    tool_choice = enforce_declared_tool_choice(tool_choice, tool_names)
+    tool_choice = normalize_tool_choice(normalized_request.raw_tool_choice)
+    if normalized_request.tool_catalog is not None and tool_choice.required_tool_name:
+        normalized_request.tool_catalog.validate_tool_choice_name(tool_choice.required_tool_name)
+    else:
+        tool_choice = enforce_declared_tool_choice(tool_choice, tool_names)
     return StandardRequest(
         prompt=prompt,
         response_model=model_name,
@@ -231,54 +234,19 @@ async def anthropic_messages(request: Request):
     original_history_messages = req_data.get("messages", [])
 
     async def prepare_locked_request(payload: dict) -> tuple[StandardRequest, dict, str, str, str, str]:
-        file_store = getattr(app.state, "file_store", None)
-        preprocessed = None
-        working_payload = payload
-        if file_store is not None:
-            preprocessed = await preprocess_attachments(working_payload, file_store, owner_token=token)
-            working_payload = preprocessed.payload
-        context_prepared = await prepare_context_attachments(
+        orchestration = await SessionOrchestrator.prepare(
             app=app,
-            payload=working_payload,
+            payload=payload,
             surface="anthropic",
-            auth_token=token,
+            token=token,
             client_profile=CLAUDE_CODE_OPENAI_PROFILE,
-            existing_attachments=(preprocessed.attachments if preprocessed is not None else None),
+            build_standard_request=_build_standard_request,
+            preprocess_attachments_fn=preprocess_attachments,
+            prepare_context_attachments_fn=prepare_context_attachments,
+            plan_persistent_session_turn_fn=plan_persistent_session_turn,
         )
-        working_payload = context_prepared["payload"]
-        standard_request = _build_standard_request(working_payload)
-        if preprocessed is not None:
-            standard_request.attachments = preprocessed.attachments
-            standard_request.uploaded_file_ids = preprocessed.uploaded_file_ids
-        standard_request.upstream_files = context_prepared["upstream_files"]
-        standard_request.session_key = context_prepared["session_key"]
-        standard_request.context_mode = context_prepared["context_mode"]
-        standard_request.context_attachment_tokens = context_prepared.get("context_attachment_tokens", 0)
-        standard_request.bound_account_email = context_prepared["bound_account_email"]
-        standard_request.bound_account = context_prepared["bound_account"]
-
-        session_plan = await plan_persistent_session_turn(app=app, request=standard_request, payload=working_payload, surface="anthropic")
-        if session_plan.enabled:
-            standard_request.persistent_session = True
-            standard_request.full_prompt = session_plan.full_prompt
-            standard_request.prompt = session_plan.prompt
-            standard_request.session_message_hashes = session_plan.current_hashes
-            standard_request.upstream_chat_id = session_plan.existing_chat_id if session_plan.reuse_chat else None
-            if standard_request.bound_account is None and session_plan.account_email:
-                standard_request.bound_account = await app.state.account_pool.acquire_wait_preferred(session_plan.account_email, timeout=60)
-                if standard_request.bound_account is not None:
-                    standard_request.bound_account_email = standard_request.bound_account.email
-            elif standard_request.bound_account is not None and not standard_request.bound_account_email:
-                standard_request.bound_account_email = standard_request.bound_account.email
-            if standard_request.upstream_chat_id and standard_request.bound_account is None:
-                log_session_plan_reuse_cancelled(
-                    request=standard_request,
-                    planned_chat_id=session_plan.existing_chat_id,
-                    reason="missing_bound_account",
-                )
-                standard_request.upstream_chat_id = None
-                standard_request.prompt = standard_request.full_prompt or standard_request.prompt
-
+        standard_request = orchestration.standard_request
+        working_payload = orchestration.working_payload
         model_name = standard_request.response_model
         qwen_model = standard_request.resolved_model
         prompt = standard_request.prompt

@@ -4,6 +4,8 @@ import random
 import time
 from typing import Optional
 
+from backend.core.account_pool_diagnostics import AccountPoolDiagnosticsService
+from backend.core.account_scheduling import RoundRobinStrategy, strategy_for_name
 from backend.core.database import AsyncJsonDB
 from backend.core.config import settings
 
@@ -148,8 +150,9 @@ class AccountPool:
         self._sticky_email: Optional[str] = None
         self.last_acquire_diagnostics: dict = {}
         self.last_acquire_wait_diagnostics: dict = {}
-        self._round_robin_index: int = 0
+        self._round_robin_strategy = RoundRobinStrategy()
         self.stats_store = stats_store
+        self._diagnostics = AccountPoolDiagnosticsService(self)
 
     async def load(self):
         data = await self.db.load()
@@ -204,109 +207,14 @@ class AccountPool:
             acc.last_request_finished = now
 
     def _account_diagnostic(self, acc: Account, now: float, exclude: set | None = None) -> dict:
-        min_interval = max(0, settings.ACCOUNT_MIN_INTERVAL_MS) / 1000.0
-        next_available_at = max(acc.rate_limited_until, acc.last_request_started + min_interval)
-        next_available_in = round(max(0.0, next_available_at - now), 3)
-        is_excluded = bool(exclude and acc.email in exclude)
-        is_rate_limited = acc.rate_limited_until > now
-        capacity_available = acc.inflight < self.max_inflight
-        # 冷却机制检查
-        is_in_cooldown = False
-        if acc.cooldown_started_at > 0:
-            cooldown_period = getattr(settings, "ACCOUNT_COOLDOWN_PERIOD_SECONDS", 300)
-            if time.time() - acc.cooldown_started_at < cooldown_period:
-                is_in_cooldown = True
-            else:
-                # 冷却期结束，自动恢复
-                acc.cooldown_started_at = 0.0
-                acc.consecutive_failures = 0
-
-        if is_excluded:
-            reason = "excluded"
-        elif acc.activation_pending:
-            reason = "pending_activation"
-        elif not acc.valid:
-            reason = acc.status_code if acc.status_code and acc.status_code != "valid" else "invalid"
-        elif is_rate_limited:
-            reason = "rate_limited"
-        elif is_in_cooldown:
-            reason = "cooldown"
-        elif not capacity_available:
-            reason = "busy"
-        elif next_available_at > now:
-            reason = "min_interval"
-        else:
-            reason = "ready"
-
-        # Phase 2: 从 stats_store 读取聚合 tok/s，回退到内存中的运行时值
-        tok_s_val = acc.tok_s
-        tok_s_updated_val = acc.tok_s_updated_at
-        if self.stats_store is not None:
-            try:
-                entry = self.stats_store.get_by_email(acc.email)
-                if entry and entry.model_stats:
-                    # 计算所有模型的加权平均 tok/s 作为聚合指标
-                    total_tokens = sum(ms.total_tokens for ms in entry.model_stats.values())
-                    if total_tokens > 0:
-                        weighted_sum = sum(
-                            ms.tok_s_ema * ms.total_tokens for ms in entry.model_stats.values()
-                        )
-                        tok_s_val = weighted_sum / total_tokens
-                        tok_s_updated_val = 0.0  # stats_store 不追踪全局更新时间戳
-            except Exception as e:
-                log.debug("Failed to read stats for %s: %s", acc.email, e)
-
-        return {
-            "email": acc.email,
-            "valid": acc.valid,
-            "status_code": acc.get_status_code(),
-            "status_text": acc.get_status_text(),
-            "ready": reason == "ready",
-            "selection_block_reason": reason,
-            "inflight": acc.inflight,
-            "max_inflight": self.max_inflight,
-            "capacity_available": capacity_available,
-            "is_rate_limited": is_rate_limited,
-            "is_in_cooldown": is_in_cooldown,
-            "rate_limited_until": acc.rate_limited_until,
-            "cooldown_started_at": acc.cooldown_started_at,
-            "cooldown_ends_at": acc.cooldown_started_at + getattr(settings, "ACCOUNT_COOLDOWN_PERIOD_SECONDS", 300) if acc.cooldown_started_at > 0 else None,
-            "next_available_at": next_available_at,
-            "next_available_in": next_available_in,
-            "last_used": acc.last_used,
-            "last_request_started": acc.last_request_started,
-            "last_request_finished": acc.last_request_finished,
-            "tok_s": tok_s_val,
-            "tok_s_updated_at": tok_s_updated_val,
-        }
+        return self._diagnostics.account_diagnostic(acc, now, exclude)
 
     def account_diagnostics(self, exclude: set | None = None) -> list[dict]:
         now = time.time()
-        return [self._account_diagnostic(acc, now, exclude) for acc in self.accounts]
+        return self._diagnostics.account_diagnostics(now, exclude)
 
     def _scheduler_snapshot(self, now: float, exclude: set | None = None) -> dict:
-        diagnostics = [self._account_diagnostic(acc, now, exclude) for acc in self.accounts]
-        blocked_reasons: dict[str, int] = {}
-        for item in diagnostics:
-            if item["ready"]:
-                continue
-            reason = item["selection_block_reason"]
-            blocked_reasons[reason] = blocked_reasons.get(reason, 0) + 1
-        ready_count = sum(1 for item in diagnostics if item["ready"])
-        next_candidates = [item["next_available_at"] for item in diagnostics if item["valid"] and item["selection_block_reason"] != "excluded"]
-        next_ready_at = min(next_candidates, default=0.0)
-        return {
-            "total": len(diagnostics),
-            "ready": ready_count,
-            "blocked": len(diagnostics) - ready_count,
-            "blocked_reasons": blocked_reasons,
-            "in_use": sum(item["inflight"] for item in diagnostics),
-            "waiting": len(self._waiters),
-            "max_inflight": self.max_inflight,
-            "account_min_interval_ms": getattr(settings, "ACCOUNT_MIN_INTERVAL_MS", 0),
-            "next_ready_at": next_ready_at,
-            "next_ready_in": round(max(0.0, next_ready_at - now), 3) if next_ready_at else 0.0,
-        }
+        return self._diagnostics.scheduler_snapshot(now, exclude)
 
     def _record_acquire_diagnostics(
         self,
@@ -319,23 +227,15 @@ class AccountPool:
         preferred_block_reason: str | None = None,
         exclude: set | None = None,
     ) -> None:
-        ready_count = sum(1 for item in diagnostics if item["ready"])
-        blocked_reasons: dict[str, int] = {}
-        for item in diagnostics:
-            if item["ready"]:
-                continue
-            reason = item["selection_block_reason"]
-            blocked_reasons[reason] = blocked_reasons.get(reason, 0) + 1
-        self.last_acquire_diagnostics = {
-            "strategy": strategy,
-            "selected_email": selected_email,
-            "preferred_email": preferred_email,
-            "preferred_block_reason": preferred_block_reason,
-            "ready_count": ready_count,
-            "blocked_count": len(diagnostics) - ready_count,
-            "blocked_reasons": blocked_reasons,
-            "snapshot": self._scheduler_snapshot(now, exclude),
-        }
+        self._diagnostics.record_acquire_diagnostics(
+            strategy=strategy,
+            selected_email=selected_email,
+            diagnostics=diagnostics,
+            now=now,
+            preferred_email=preferred_email,
+            preferred_block_reason=preferred_block_reason,
+            exclude=exclude,
+        )
 
     async def acquire_preferred(self, preferred_email: str | None = None, exclude: set = None) -> Optional[Account]:
         if not preferred_email:
@@ -415,33 +315,8 @@ class AccountPool:
                 )
                 return None
 
-            if strategy == "least_loaded":
-                # 按负载排序，选最少负载的
-                ready.sort(key=lambda a: (
-                    a.inflight,
-                    a.last_request_started or 0.0,
-                    a.last_used or 0.0,
-                    a.email or "",
-                ))
-                best = ready[0]
-            elif strategy == "least_used":
-                # 最久未使用优先 — 均匀分配请求到所有账户
-                ready.sort(key=lambda a: (a.last_used or 0.0, a.email or ""))
-                best = ready[0]
-            elif strategy == "round_robin":
-                # 简单轮询 — 按顺序分配
-                self._round_robin_index = self._round_robin_index % len(ready)
-                best = ready[self._round_robin_index]
-                self._round_robin_index += 1
-            else:
-                # 未知策略，fallback 到 least_loaded
-                ready.sort(key=lambda a: (
-                    a.inflight,
-                    a.last_request_started or 0.0,
-                    a.last_used or 0.0,
-                    a.email or "",
-                ))
-                best = ready[0]
+            selector = strategy_for_name(strategy, self._round_robin_strategy)
+            best = selector.select(ready)
 
             best.inflight += 1
             best.last_used = now

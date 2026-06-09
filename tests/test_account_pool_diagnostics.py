@@ -9,6 +9,7 @@ class AccountPoolDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.original_min_interval_ms = settings.ACCOUNT_MIN_INTERVAL_MS
         self.original_busy_timeout = getattr(settings, "ACCOUNT_BUSY_TIMEOUT_SECONDS", None)
+        self.original_cooldown_period = getattr(settings, "ACCOUNT_COOLDOWN_PERIOD_SECONDS", None)
 
     async def asyncTearDown(self) -> None:
         settings.ACCOUNT_MIN_INTERVAL_MS = self.original_min_interval_ms
@@ -17,6 +18,11 @@ class AccountPoolDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                 delattr(settings, "ACCOUNT_BUSY_TIMEOUT_SECONDS")
         else:
             settings.ACCOUNT_BUSY_TIMEOUT_SECONDS = self.original_busy_timeout
+        if self.original_cooldown_period is None:
+            if hasattr(settings, "ACCOUNT_COOLDOWN_PERIOD_SECONDS"):
+                delattr(settings, "ACCOUNT_COOLDOWN_PERIOD_SECONDS")
+        else:
+            settings.ACCOUNT_COOLDOWN_PERIOD_SECONDS = self.original_cooldown_period
 
     def _pool(self, *accounts: Account, max_inflight: int = 1) -> AccountPool:
         pool = AccountPool(db=None, max_inflight=max_inflight)
@@ -63,6 +69,22 @@ class AccountPoolDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(by_email["invalid@example.com"]["ready"])
         self.assertEqual(by_email["invalid@example.com"]["selection_block_reason"], "invalid")
+
+    def test_account_diagnostics_does_not_reset_expired_cooldown_state(self) -> None:
+        settings.ACCOUNT_MIN_INTERVAL_MS = 0
+        settings.ACCOUNT_COOLDOWN_PERIOD_SECONDS = 300
+        account = Account(email="cooldown-expired@example.com")
+        account.cooldown_started_at = 100.0
+        account.consecutive_failures = 3
+        pool = self._pool(account)
+
+        with patch("backend.core.account_pool.time.time", return_value=500.0):
+            diagnostics = pool.account_diagnostics()
+
+        self.assertTrue(diagnostics[0]["ready"])
+        self.assertFalse(diagnostics[0]["is_in_cooldown"])
+        self.assertEqual(account.cooldown_started_at, 100.0)
+        self.assertEqual(account.consecutive_failures, 3)
 
     async def test_acquire_records_least_loaded_selection_diagnostics(self) -> None:
         first = Account(email="first@example.com")

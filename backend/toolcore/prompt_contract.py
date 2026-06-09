@@ -10,6 +10,7 @@ from backend.services.client_profiles import (
     OPENCLAW_OPENAI_PROFILE,
     QWEN_CODE_OPENAI_PROFILE,
 )
+from backend.toolcore.dsml_contract import DSML_TOOL_CALLS_FORMAT
 
 
 def _is_heavy_tool_profile(client_profile: str) -> bool:
@@ -174,11 +175,7 @@ def build_tool_instruction_block(
         f"Bridge-call slots available: {', '.join(names)}",
         "",
         "TOOL CALL FORMAT — FOLLOW EXACTLY:",
-        "<|DSML|tool_calls>",
-        '  <|DSML|invoke name="TOOL_NAME_HERE">',
-        '    <|DSML|parameter name="PARAMETER_NAME"><![CDATA[PARAMETER_VALUE]]></|DSML|parameter>',
-        "  </|DSML|invoke>",
-        "</|DSML|tool_calls>",
+        *DSML_TOOL_CALLS_FORMAT,
         "",
         "Rules:",
         "- Use one <|DSML|tool_calls> root when calling tools.",

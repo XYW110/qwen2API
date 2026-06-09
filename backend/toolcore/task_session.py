@@ -8,6 +8,7 @@ from typing import Any
 
 from backend.adapter.standard_request import CLAUDE_CODE_OPENAI_PROFILE, StandardRequest
 from backend.services.client_profiles import user_role_system_text
+from backend.toolcore.dsml_contract import DSML_TOOL_CALLS_FORMAT
 from backend.toolcore.prompt_builder import _extract_text, _extract_user_text_only, _render_history_tool_call
 
 log = logging.getLogger("qwen2api.task_session")
@@ -209,11 +210,7 @@ def build_continuation_prompt(
         'Process ONLY the new items below and continue the task from there.',
         '',
         'CRITICAL TOOL CALL FORMAT - MUST USE DSML/XML:',
-        '<|DSML|tool_calls>',
-        '  <|DSML|invoke name="EXACT_TOOL_NAME">',
-        '    <|DSML|parameter name="param"><![CDATA[value]]></|DSML|parameter>',
-        '  </|DSML|invoke>',
-        '</|DSML|tool_calls>',
+        *DSML_TOOL_CALLS_FORMAT,
         '',
         '=== AVAILABLE TOOLS ===',
         tool_definitions,
@@ -240,53 +237,132 @@ def build_continuation_prompt(
     return '\n'.join(lines)
 
 
-def build_retry_rebase_prompt(request: StandardRequest, *, reason: str | None = None) -> str:
-    base = (request.full_prompt or request.prompt or '').rstrip()
-    guidance = (
+# Dispatch table for build_retry_rebase_prompt: maps a reason prefix/exact-match
+# to a function that produces the guidance string given the full reason value.
+_RETRY_GUIDANCE_DISPATCH: list[tuple[callable, callable]] = []
+
+
+def _retry_guidance_dispatch(reason: str) -> str:
+    """Resolve retry-guidance string from a reason tag.
+
+    Defaults to a generic "continue from scratch" guidance when no dispatch
+    entry matches.
+    """
+    for check_fn, build_fn in _RETRY_GUIDANCE_DISPATCH:
+        if check_fn(reason):
+            return build_fn(reason)
+    return (
         '[MANDATORY NEXT STEP]: Continue this task from scratch using the tool contract exactly. '
         'Do NOT repeat the previous malformed, redundant, or already-resolved step. '
         'If the needed tool result is already in the provided history, use it and choose the next action or finish.'
     )
-    if reason:
-        if reason.startswith('repeated_same_tool:'):
-            tool_name = reason.split(':', 1)[1] or 'the same tool'
-            guidance = (
-                f'[MANDATORY NEXT STEP]: You already called {tool_name} with the same input. '
-                'Do NOT repeat it. Use the existing result and move to the next relevant step or finish the task.'
-            )
-        elif reason.startswith('repeated_same_read:'):
-            tool_name = reason.split(':', 1)[1] or 'Read'
-            guidance = (
-                f'[MANDATORY NEXT STEP]: You are stuck rereading the same file with {tool_name}. '
-                'Do NOT keep rereading the same target. Use the current file content to continue the analysis, inspect a different relevant file if needed, run a targeted non-listing command, or finish if you already have enough information.'
-            )
-        elif reason.startswith('blocked_tool_name:'):
-            tool_name = reason.split(':', 1)[1] or 'the requested tool'
-            guidance = (
-                f'[MANDATORY NEXT STEP]: Your last attempt used the wrong tool-call syntax for {tool_name}. '
-                'Use the exact tool contract for this gateway and call that tool again using the correct wrapper only.'
-            )
-        elif reason.startswith('exploration_loop:'):
-            parts = reason.split(':')
-            tool_name = parts[1] if len(parts) > 1 and parts[1] else 'an exploration tool'
-            count_text = parts[2] if len(parts) > 2 and parts[2] else 'multiple'
-            guidance = (
-                f'[MANDATORY NEXT STEP]: You are in an exploration loop ({count_text} exploratory calls in a row, latest: {tool_name}). '
-                'Stop broad exploration. Use the results already in history to narrow the scope, inspect a different relevant file, run a more targeted non-listing command, or provide the final answer.'
-            )
-        elif reason == 'unchanged_read_result':
-            guidance = (
-                "[MANDATORY NEXT STEP]: You already received 'Unchanged since last read'. "
-                'Do NOT call Read again on the same target. Use the current file content to continue the analysis, inspect a different relevant file if needed, or provide the final answer.'
-            )
-        elif reason == 'search_no_results':
-            guidance = (
-                '[MANDATORY NEXT STEP]: The last search tool returned no results. '
-                'Do NOT repeat the same search. Use another tool or answer with the best available information.'
-            )
+
+
+def _register_retry_guidance(prefix: str, builder: callable) -> None:
+    """Register a prefix-based guidance builder in the dispatch table."""
+    def _check(r: str) -> bool:
+        return r.startswith(prefix)
+
+    _RETRY_GUIDANCE_DISPATCH.append((_check, builder))
+
+
+# -- Concrete dispatch entries -------------------------------------------------
+
+def _build_guidance_repeated_same_tool(reason: str) -> str:
+    tool_name = reason.split(':', 1)[1] if ':' in reason else 'the same tool'
+    return (
+        f'[MANDATORY NEXT STEP]: You already called {tool_name} with the same input. '
+        'Do NOT repeat it. Use the existing result and move to the next relevant step or finish the task.'
+    )
+
+
+def _build_guidance_repeated_same_read(reason: str) -> str:
+    tool_name = reason.split(':', 1)[1] if ':' in reason else 'Read'
+    return (
+        f'[MANDATORY NEXT STEP]: You are stuck rereading the same file with {tool_name}. '
+        'Do NOT keep rereading the same target. Use the current file content to continue the analysis, inspect a different relevant file if needed, run a targeted non-listing command, or finish if you already have enough information.'
+    )
+
+
+def _build_guidance_blocked_tool_name(reason: str) -> str:
+    tool_name = reason.split(':', 1)[1] if ':' in reason else 'the requested tool'
+    return (
+        f'[MANDATORY NEXT STEP]: Your last attempt used the wrong tool-call syntax for {tool_name}. '
+        'Use the exact tool contract for this gateway and call that tool again using the correct wrapper only.'
+    )
+
+
+def _build_guidance_exploration_loop(reason: str) -> str:
+    parts = reason.split(':')
+    tool_name = parts[1] if len(parts) > 1 and parts[1] else 'an exploration tool'
+    count_text = parts[2] if len(parts) > 2 and parts[2] else 'multiple'
+    return (
+        f'[MANDATORY NEXT STEP]: You are in an exploration loop ({count_text} exploratory calls in a row, latest: {tool_name}). '
+        'Stop broad exploration. Use the results already in history to narrow the scope, inspect a different relevant file, run a more targeted non-listing command, or provide the final answer.'
+    )
+
+
+def _build_guidance_unchanged_read_result(_reason: str) -> str:
+    return (
+        "[MANDATORY NEXT STEP]: You already received 'Unchanged since last read'. "
+        'Do NOT call Read again on the same target. Use the current file content to continue the analysis, inspect a different relevant file if needed, or provide the final answer.'
+    )
+
+
+def _build_guidance_search_no_results(_reason: str) -> str:
+    return (
+        '[MANDATORY NEXT STEP]: The last search tool returned no results. '
+        'Do NOT repeat the same search. Use another tool or answer with the best available information.'
+    )
+
+
+# Register prefix-based entries
+_register_retry_guidance('repeated_same_tool:', _build_guidance_repeated_same_tool)
+_register_retry_guidance('repeated_same_read:', _build_guidance_repeated_same_read)
+_register_retry_guidance('blocked_tool_name:', _build_guidance_blocked_tool_name)
+_register_retry_guidance('exploration_loop:', _build_guidance_exploration_loop)
+# Exact-match entries are registered as prefix checks that also verify full equality
+_register_retry_guidance('unchanged_read_result', _build_guidance_unchanged_read_result)
+_register_retry_guidance('search_no_results', _build_guidance_search_no_results)
+
+
+def build_retry_rebase_prompt(request: StandardRequest, *, reason: str | None = None) -> str:
+    base = (request.full_prompt or request.prompt or '').rstrip()
+    guidance = _retry_guidance_dispatch(reason or '')
     if base.endswith('Assistant:'):
         return base[:-len('Assistant:')] + guidance + '\nAssistant:'
     return base + '\n\n' + guidance + '\nAssistant:'
+
+
+def _build_plan_defaults(
+    *,
+    prompt: str,
+    full_prompt: str,
+    current_hashes: list[str],
+    enabled: bool,
+    reuse_chat: bool,
+    existing_chat_id: str | None,
+    account_email: str | None,
+    reason: str | None,
+    existing_hash_count: int,
+    new_entries_count: int,
+) -> PersistentSessionPlan:
+    """Construct a PersistentSessionPlan from explicit fields.
+
+    Eliminates 4 repeated inline constructions in plan_persistent_session_turn.
+    """
+    return PersistentSessionPlan(
+        enabled=enabled,
+        reuse_chat=reuse_chat,
+        prompt=prompt,
+        full_prompt=full_prompt,
+        current_hashes=current_hashes,
+        existing_chat_id=existing_chat_id,
+        account_email=account_email,
+        reason=reason,
+        existing_hash_count=existing_hash_count,
+        new_entries_count=new_entries_count,
+    )
 
 
 async def plan_persistent_session_turn(*, app, request: StandardRequest, payload: dict[str, Any], surface: str) -> PersistentSessionPlan:
@@ -305,12 +381,12 @@ async def plan_persistent_session_turn(*, app, request: StandardRequest, payload
     current_hashes = [entry.digest for entry in entries]
 
     if not should_use_persistent_tool_session(request):
-        plan = PersistentSessionPlan(
-            enabled=False,
-            reuse_chat=False,
+        plan = _build_plan_defaults(
             prompt=full_prompt,
             full_prompt=full_prompt,
             current_hashes=current_hashes,
+            enabled=False,
+            reuse_chat=False,
             existing_chat_id=None,
             account_email=request.bound_account_email,
             reason=persistent_session_disabled_reason(request),
@@ -326,12 +402,12 @@ async def plan_persistent_session_turn(*, app, request: StandardRequest, payload
     account_email = request.bound_account_email or (record.account_email if record else None)
 
     if not record or not existing_chat_id or not existing_hashes:
-        plan = PersistentSessionPlan(
-            enabled=True,
-            reuse_chat=False,
+        plan = _build_plan_defaults(
             prompt=full_prompt,
             full_prompt=full_prompt,
             current_hashes=current_hashes,
+            enabled=True,
+            reuse_chat=False,
             existing_chat_id=None,
             account_email=account_email,
             reason='new_session',
@@ -342,12 +418,12 @@ async def plan_persistent_session_turn(*, app, request: StandardRequest, payload
         return plan
 
     if len(current_hashes) < len(existing_hashes) or current_hashes[:len(existing_hashes)] != existing_hashes:
-        plan = PersistentSessionPlan(
-            enabled=True,
-            reuse_chat=False,
+        plan = _build_plan_defaults(
             prompt=full_prompt,
             full_prompt=full_prompt,
             current_hashes=current_hashes,
+            enabled=True,
+            reuse_chat=False,
             existing_chat_id=None,
             account_email=account_email,
             reason='history_desync',
@@ -358,9 +434,7 @@ async def plan_persistent_session_turn(*, app, request: StandardRequest, payload
         return plan
 
     new_entries = entries[len(existing_hashes):]
-    plan = PersistentSessionPlan(
-        enabled=True,
-        reuse_chat=True,
+    plan = _build_plan_defaults(
         prompt=build_continuation_prompt(
             new_entries,
             tool_names=request.tool_names,
@@ -368,6 +442,8 @@ async def plan_persistent_session_turn(*, app, request: StandardRequest, payload
         ),
         full_prompt=full_prompt,
         current_hashes=current_hashes,
+        enabled=True,
+        reuse_chat=True,
         existing_chat_id=existing_chat_id,
         account_email=account_email,
         reason='reuse_chat',

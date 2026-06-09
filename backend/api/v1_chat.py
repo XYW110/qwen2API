@@ -8,24 +8,25 @@ import time
 import uuid
 from typing import Any, Awaitable, Callable
 from backend.adapter.standard_request import StandardRequest, detect_openai_client_profile
+from backend.api.openai_responders import OpenAIResponderContext, OpenAIStreamResponder, OpenAISyncResponder
 from backend.core.config import settings
 from backend.core.request_logging import new_request_id, request_context, update_request_context
 from backend.services.attachment_preprocessor import preprocess_attachments
-from backend.services.context_attachment_manager import prepare_context_attachments, derive_session_key
+from backend.services.context_attachment_manager import derive_session_key, prepare_context_attachments
 from backend.services.auth_quota import add_used_tokens, resolve_auth_context
 from backend.services.completion_bridge import run_retryable_completion_bridge
 from backend.services.openai_stream_translator import OpenAIStreamTranslator
 from backend.services.response_formatters import build_openai_completion_payload
 from backend.services.token_calc import calculate_usage
 from backend.services.qwen_client import QwenClient
+from backend.services.session_orchestrator import SessionOrchestrator
 from backend.services.standard_request_builder import build_chat_standard_request
 from backend.toolcore.request_singleflight import RequestSingleflight
 from backend.toolcore.task_session import (
     build_openai_assistant_history_message,
     clear_invalidated_session_chat,
-    log_session_plan_reuse_cancelled,
-    persist_session_turn,
     plan_persistent_session_turn,
+    persist_session_turn,
 )
 from backend.runtime.execution import RuntimeAttemptState, RuntimeToolDirective, build_tool_directive, build_usage_delta_factory, request_max_attempts
 
@@ -943,45 +944,31 @@ async def chat_completions(request: Request):
                 return JSONResponse(payload)
 
     try:
-        context_prepared = await prepare_context_attachments(app=app, payload=req_data, surface="openai", auth_token=token, client_profile=client_profile, existing_attachments=(preprocessed.attachments if preprocessed is not None else None))
+        orchestration = await SessionOrchestrator.prepare(
+            app=app,
+            payload=req_data,
+            surface="openai",
+            token=token,
+            client_profile=client_profile,
+            build_standard_request=lambda working_payload: _build_standard_request(
+                working_payload,
+                client_profile=client_profile,
+            ),
+            preprocessed=preprocessed,
+            prepare_context_attachments_fn=prepare_context_attachments,
+            plan_persistent_session_turn_fn=plan_persistent_session_turn,
+        )
     except Exception as e:
         if singleflight_owner and singleflight_key is not None:
             await _openai_json_singleflight.fail(singleflight_key, e)
         raise
-    req_data = context_prepared["payload"]
-    standard_request = _build_standard_request(req_data, client_profile=client_profile)
-    if preprocessed is not None:
-        standard_request.attachments = preprocessed.attachments
-        standard_request.uploaded_file_ids = preprocessed.uploaded_file_ids
-    standard_request.upstream_files = context_prepared["upstream_files"]
-    standard_request.session_key = context_prepared["session_key"]
-    standard_request.context_mode = context_prepared["context_mode"]
-    standard_request.context_attachment_tokens = context_prepared.get("context_attachment_tokens", 0)
-    standard_request.context_fingerprint = _build_openai_context_fingerprint(req_data=req_data, context_prepared=context_prepared)
-    standard_request.bound_account_email = context_prepared["bound_account_email"]
-    standard_request.bound_account = context_prepared["bound_account"]
-
-    session_plan = await plan_persistent_session_turn(app=app, request=standard_request, payload=req_data, surface="openai")
-    if session_plan.enabled:
-        standard_request.persistent_session = True
-        standard_request.full_prompt = session_plan.full_prompt
-        standard_request.prompt = session_plan.prompt
-        standard_request.session_message_hashes = session_plan.current_hashes
-        standard_request.upstream_chat_id = session_plan.existing_chat_id if session_plan.reuse_chat else None
-        if standard_request.bound_account is None and session_plan.account_email:
-            standard_request.bound_account = await app.state.account_pool.acquire_wait_preferred(session_plan.account_email, timeout=60)
-            if standard_request.bound_account is not None:
-                standard_request.bound_account_email = standard_request.bound_account.email
-        elif standard_request.bound_account is not None and not standard_request.bound_account_email:
-            standard_request.bound_account_email = standard_request.bound_account.email
-        if standard_request.upstream_chat_id and standard_request.bound_account is None:
-            log_session_plan_reuse_cancelled(
-                request=standard_request,
-                planned_chat_id=session_plan.existing_chat_id,
-                reason="missing_bound_account",
-            )
-            standard_request.upstream_chat_id = None
-            standard_request.prompt = standard_request.full_prompt or standard_request.prompt
+    req_data = orchestration.working_payload
+    context_prepared = orchestration.context_prepared
+    standard_request = orchestration.standard_request
+    standard_request.context_fingerprint = _build_openai_context_fingerprint(
+        req_data=req_data,
+        context_prepared=context_prepared,
+    )
 
     model_name = standard_request.response_model
     qwen_model = standard_request.resolved_model
@@ -1079,382 +1066,44 @@ async def chat_completions(request: Request):
                 await _openai_json_singleflight.complete(singleflight_key, payload)
             return JSONResponse(payload)
 
+        responder_context = OpenAIResponderContext(
+            app=app,
+            client=client,
+            users_db=users_db,
+            token=token,
+            req_data=req_data,
+            session_key=session_key,
+            completion_id=completion_id,
+            created=created,
+            req_id=req_id,
+            diagnostics=diagnostics,
+            guard_diagnostics=guard_diagnostics,
+            model_name=model_name,
+            prompt=prompt,
+            history_messages=history_messages,
+            standard_request=standard_request,
+            stream_usage=_stream_usage,
+            record_repeated_tool_guard=_record_repeated_tool_guard,
+            completion_bridge=run_retryable_completion_bridge,
+            stream_translator_cls=OpenAIStreamTranslator,
+            build_tool_directive_fn=build_tool_directive,
+            build_openai_assistant_history_message_fn=build_openai_assistant_history_message,
+            persist_session_turn_fn=persist_session_turn,
+            clear_invalidated_session_chat_fn=clear_invalidated_session_chat,
+            build_openai_completion_payload_fn=build_openai_completion_payload,
+            update_request_context_fn=update_request_context,
+            singleflight=_openai_json_singleflight,
+            singleflight_owner=singleflight_owner,
+            singleflight_key=singleflight_key,
+            openai_content_delta_text=_openai_content_delta_text,
+            is_openai_tool_call_delta_chunk=_is_openai_tool_call_delta_chunk,
+            filter_staged_chunks_for_tool_calls=_filter_staged_chunks_for_tool_calls,
+            log_openai_stream_sse_chunk=_log_openai_stream_sse_chunk,
+            log_openai_stream_finalize_options=_log_openai_stream_finalize_options,
+            log_openai_stream_protocol_diagnostics=_log_openai_stream_protocol_diagnostics,
+            log_outbound_tool_call_diagnostics=_log_outbound_tool_call_diagnostics,
+            stage_directive_tool_calls_if_missing=_stage_directive_tool_calls_if_missing,
+        )
         if standard_request.stream:
-            async def generate():
-                queue: asyncio.Queue[str | None] = asyncio.Queue()
-
-                async def producer() -> None:
-                    async with app.state.session_locks.hold(session_key):
-                        try:
-                            update_request_context(stream_attempt=1)
-                            if standard_request.tools:
-                                translator: OpenAIStreamTranslator | None = None
-                                staged_chunks: list[str] = []
-                                emitted_protocol_chunks: list[str] = []
-                                emitted_tool_call_chunks: list[str] = []
-                                buffered_content_chars = 0
-                                min_stream_content_chars = 80
-
-                                async def on_attempt_start(_attempt_index: int, _attempt_prompt: str) -> None:
-                                    nonlocal translator, staged_chunks, emitted_protocol_chunks, emitted_tool_call_chunks, buffered_content_chars
-                                    translator = OpenAIStreamTranslator(
-                                        completion_id=completion_id,
-                                        created=created,
-                                        model_name=model_name,
-                                        client_profile=standard_request.client_profile,
-                                        build_final_directive=lambda answer_text: build_tool_directive(
-                                            standard_request,
-                                            RuntimeAttemptState(answer_text=answer_text),
-                                        ),
-                                        allowed_tool_names=standard_request.tool_names,
-                                        toolcore_enabled=settings.TOOLCORE_V2_ENABLED,
-                                        tool_catalog=standard_request.tool_catalog,
-                                    )
-                                    staged_chunks = []
-                                    emitted_protocol_chunks = []
-                                    emitted_tool_call_chunks = []
-                                    buffered_content_chars = 0
-
-                                streamed_content_to_client = False
-
-                                async def on_retry(_attempt_index: int, _retry, _execution) -> None:
-                                    nonlocal staged_chunks, emitted_protocol_chunks, emitted_tool_call_chunks, buffered_content_chars
-                                    staged_chunks = []
-                                    emitted_protocol_chunks = []
-                                    emitted_tool_call_chunks = []
-                                    buffered_content_chars = 0
-
-                                async def on_delta(evt: dict[str, Any], text_chunk: str | None, tool_calls: list[dict[str, Any]] | None) -> None:
-                                    nonlocal staged_chunks, emitted_protocol_chunks, emitted_tool_call_chunks, streamed_content_to_client, buffered_content_chars
-                                    if translator is None:
-                                        return
-                                    translator.on_delta(evt, text_chunk, tool_calls)
-                                    while translator.pending_chunks:
-                                        chunk = translator.pending_chunks.pop(0)
-                                        content_text = _openai_content_delta_text(chunk)
-                                        if content_text is None:
-                                            emitted_protocol_chunks.append(chunk)
-                                            if _is_openai_tool_call_delta_chunk(chunk):
-                                                emitted_tool_call_chunks.append(chunk)
-                                            await queue.put(chunk)
-                                            continue
-                                        if streamed_content_to_client:
-                                            await queue.put(chunk)
-                                            continue
-                                        staged_chunks.append(chunk)
-                                        buffered_content_chars += len(content_text)
-                                        if buffered_content_chars >= min_stream_content_chars:
-                                            for staged_chunk in staged_chunks:
-                                                await queue.put(staged_chunk)
-                                            staged_chunks = []
-                                            streamed_content_to_client = True
-
-                                result = await run_retryable_completion_bridge(
-                                    client=client,
-                                    standard_request=standard_request,
-                                    prompt=prompt,
-                                    users_db=users_db,
-                                    token=token,
-                                    api_key_manager=getattr(app.state, "api_key_manager", None),
-                                    history_messages=history_messages,
-                                    max_attempts=request_max_attempts(standard_request),
-                                    usage_delta_factory=build_usage_delta_factory(
-                                        prompt,
-                                        extra_prompt_tokens=standard_request.context_attachment_tokens,
-                                    ),
-                                    allow_after_visible_output=True,
-                                    capture_events=False,
-                                    on_delta=on_delta,
-                                    on_attempt_start=on_attempt_start,
-                                    on_retry=on_retry,
-                                )
-                                execution = result.execution
-                                directive = result.directive or build_tool_directive(standard_request, execution.state)
-                                if streamed_content_to_client and directive.stop_reason == "tool_use":
-                                    log.warning(
-                                        "[OAI] suppress_tool_calls_after_streamed_content req_id=%s completion_id=%s prompt_hash=%s",
-                                        req_id,
-                                        completion_id,
-                                        diagnostics["prompt_hash"],
-                                    )
-                                    directive = RuntimeToolDirective(
-                                        tool_blocks=[{"type": "text", "text": execution.state.answer_text or ""}],
-                                        stop_reason="end_turn",
-                                    )
-                                assistant_message = build_openai_assistant_history_message(
-                                    execution=execution,
-                                    request=standard_request,
-                                    directive=directive,
-                                )
-                                await persist_session_turn(
-                                    app=app,
-                                    request=standard_request,
-                                    surface="openai",
-                                    execution=execution,
-                                    assistant_message=assistant_message,
-                                )
-                                final_finish_reason = "tool_calls" if directive.stop_reason == "tool_use" else (execution.state.finish_reason or "stop")
-                                tool_names = [block.get("name") for block in directive.tool_blocks if block.get("type") == "tool_use"]
-                                _record_repeated_tool_guard(
-                                    session_key=standard_request.session_key or session_key,
-                                    diagnostics=guard_diagnostics,
-                                    final_diagnostics=diagnostics,
-                                    tool_names=tool_names,
-                                    finish_reason=final_finish_reason,
-                                )
-                                _stage_directive_tool_calls_if_missing(
-                                    translator=translator,
-                                    directive=directive,
-                                    staged_chunks=staged_chunks,
-                                )
-                                log.info(
-                                    "[OAI] stream_final req_id=%s completion_id=%s chat_id=%s prompt_hash=%s finish_reason=%s stop_reason=%s tool_names=%s answer_chars=%s staged_chunks=%s",
-                                    req_id,
-                                    completion_id,
-                                    execution.chat_id,
-                                    diagnostics["prompt_hash"],
-                                    final_finish_reason,
-                                    directive.stop_reason,
-                                    tool_names,
-                                    len(execution.state.answer_text or ""),
-                                    len(staged_chunks),
-                                )
-                                output_staged_chunks = _filter_staged_chunks_for_tool_calls(staged_chunks) if final_finish_reason == "tool_calls" else staged_chunks
-                                if final_finish_reason == "tool_calls":
-                                    _log_outbound_tool_call_diagnostics(
-                                        req_id=req_id,
-                                        completion_id=completion_id,
-                                        prompt_hash=diagnostics["prompt_hash"],
-                                        standard_request=standard_request,
-                                        chunks=emitted_tool_call_chunks + output_staged_chunks,
-                                    )
-                                for chunk in output_staged_chunks:
-                                    await queue.put(chunk)
-                                if translator is not None:
-                                    usage = _stream_usage(result, prompt)
-                                    _log_openai_stream_finalize_options(
-                                        req_id=req_id,
-                                        completion_id=completion_id,
-                                        prompt_hash=diagnostics["prompt_hash"],
-                                        req_data=req_data,
-                                        finish_reason=final_finish_reason,
-                                        usage=usage,
-                                        answer_text=execution.state.answer_text or "",
-                                    )
-                                    final_chunks = translator.finalize(final_finish_reason, usage=usage)
-                                    if final_finish_reason == "tool_calls":
-                                        _log_openai_stream_protocol_diagnostics(
-                                            req_id=req_id,
-                                            completion_id=completion_id,
-                                            prompt_hash=diagnostics["prompt_hash"],
-                                            chunks=emitted_protocol_chunks + output_staged_chunks + final_chunks,
-                                        )
-                                    for chunk in final_chunks:
-                                        await queue.put(chunk)
-                            else:
-                                translator = OpenAIStreamTranslator(
-                                    completion_id=completion_id,
-                                    created=created,
-                                    model_name=model_name,
-                                    client_profile=standard_request.client_profile,
-                                    build_final_directive=lambda answer_text: build_tool_directive(
-                                        standard_request,
-                                        RuntimeAttemptState(answer_text=answer_text),
-                                    ),
-                                    allowed_tool_names=standard_request.tool_names,
-                                    toolcore_enabled=settings.TOOLCORE_V2_ENABLED,
-                                )
-
-                                async def on_delta(evt: dict[str, Any], text_chunk: str | None, tool_calls: list[dict[str, Any]] | None) -> None:
-                                    translator.on_delta(evt, text_chunk, tool_calls)
-                                    while translator.pending_chunks:
-                                        await queue.put(translator.pending_chunks.pop(0))
-
-                                result = await run_retryable_completion_bridge(
-                                    client=client,
-                                    standard_request=standard_request,
-                                    prompt=prompt,
-                                    users_db=users_db,
-                                    token=token,
-                                    api_key_manager=getattr(app.state, "api_key_manager", None),
-                                    history_messages=history_messages,
-                                    max_attempts=request_max_attempts(standard_request),
-                                    usage_delta_factory=build_usage_delta_factory(
-                                        prompt,
-                                        extra_prompt_tokens=standard_request.context_attachment_tokens,
-                                    ),
-                                    allow_after_visible_output=True,
-                                    capture_events=False,
-                                    on_delta=on_delta,
-                                )
-                                execution = result.execution
-                                directive = result.directive or build_tool_directive(standard_request, execution.state)
-                                assistant_message = build_openai_assistant_history_message(
-                                    execution=execution,
-                                    request=standard_request,
-                                    directive=directive,
-                                )
-                                await persist_session_turn(
-                                    app=app,
-                                    request=standard_request,
-                                    surface="openai",
-                                    execution=execution,
-                                    assistant_message=assistant_message,
-                                )
-                                final_finish_reason = "tool_calls" if directive.stop_reason == "tool_use" else (execution.state.finish_reason or "stop")
-                                tool_names = [block.get("name") for block in directive.tool_blocks if block.get("type") == "tool_use"]
-                                _record_repeated_tool_guard(
-                                    session_key=standard_request.session_key or session_key,
-                                    diagnostics=guard_diagnostics,
-                                    final_diagnostics=diagnostics,
-                                    tool_names=tool_names,
-                                    finish_reason=final_finish_reason,
-                                )
-                                log.info(
-                                    "[OAI] stream_final req_id=%s completion_id=%s chat_id=%s prompt_hash=%s finish_reason=%s stop_reason=%s tool_names=%s answer_chars=%s staged_chunks=%s",
-                                    req_id,
-                                    completion_id,
-                                    execution.chat_id,
-                                    diagnostics["prompt_hash"],
-                                    final_finish_reason,
-                                    directive.stop_reason,
-                                    tool_names,
-                                    len(execution.state.answer_text or ""),
-                                    len(translator.pending_chunks),
-                                )
-                                usage = _stream_usage(result, prompt)
-                                _log_openai_stream_finalize_options(
-                                    req_id=req_id,
-                                    completion_id=completion_id,
-                                    prompt_hash=diagnostics["prompt_hash"],
-                                    req_data=req_data,
-                                    finish_reason=final_finish_reason,
-                                    usage=usage,
-                                    answer_text=execution.state.answer_text or "",
-                                )
-                                for chunk in translator.finalize(final_finish_reason, usage=usage):
-                                    await queue.put(chunk)
-                        except HTTPException as he:
-                            await clear_invalidated_session_chat(app=app, request=standard_request)
-                            await queue.put(f"data: {json.dumps({'error': he.detail})}\n\n")
-                        except Exception as e:
-                            log.exception(
-                                "[OAI] stream_error req_id=%s completion_id=%s prompt_hash=%s error=%s",
-                                req_id,
-                                completion_id,
-                                diagnostics["prompt_hash"],
-                                e,
-                            )
-                            await clear_invalidated_session_chat(app=app, request=standard_request)
-                            await queue.put(f"data: {json.dumps({'error': str(e)})}\n\n")
-                        finally:
-                            log.info(
-                                "[OAI] stream_producer_done req_id=%s completion_id=%s prompt_hash=%s",
-                                req_id,
-                                completion_id,
-                                diagnostics["prompt_hash"],
-                            )
-                            await queue.put(None)
-
-                producer_task = asyncio.create_task(producer())
-                try:
-                    while True:
-                        chunk = await queue.get()
-                        if chunk is None:
-                            break
-                        _log_openai_stream_sse_chunk(
-                            req_id=req_id,
-                            completion_id=completion_id,
-                            prompt_hash=diagnostics["prompt_hash"],
-                            chunk=chunk,
-                        )
-                        yield chunk
-                finally:
-                    if not producer_task.done():
-                        log.warning(
-                            "[OAI] stream_client_disconnect req_id=%s completion_id=%s prompt_hash=%s",
-                            req_id,
-                            completion_id,
-                            diagnostics["prompt_hash"],
-                        )
-                        producer_task.cancel()
-                        try:
-                            await producer_task
-                        except Exception:
-                            pass
-
-            return StreamingResponse(
-                generate(),
-                media_type="text/event-stream",
-                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-            )
-
-        try:
-            async with app.state.session_locks.hold(session_key):
-                update_request_context(stream_attempt=1)
-                result = await run_retryable_completion_bridge(
-                    client=client,
-                    standard_request=standard_request,
-                    prompt=prompt,
-                    users_db=users_db,
-                    token=token,
-                    api_key_manager=getattr(app.state, "api_key_manager", None),
-                    history_messages=history_messages,
-                    max_attempts=request_max_attempts(standard_request),
-                    usage_delta_factory=build_usage_delta_factory(
-                        prompt,
-                        extra_prompt_tokens=standard_request.context_attachment_tokens,
-                    ),
-                    allow_after_visible_output=True,
-                )
-                execution = result.execution
-                directive = result.directive or build_tool_directive(standard_request, execution.state)
-                assistant_message = build_openai_assistant_history_message(
-                    execution=execution,
-                    request=standard_request,
-                    directive=directive,
-                )
-                await persist_session_turn(
-                    app=app,
-                    request=standard_request,
-                    surface="openai",
-                    execution=execution,
-                    assistant_message=assistant_message,
-                )
-                tool_names = [block.get("name") for block in directive.tool_blocks if block.get("type") == "tool_use"]
-                final_finish_reason = "tool_calls" if directive.stop_reason == "tool_use" else (execution.state.finish_reason or "stop")
-                _record_repeated_tool_guard(
-                    session_key=standard_request.session_key or session_key,
-                    diagnostics=guard_diagnostics,
-                    final_diagnostics=diagnostics,
-                    tool_names=tool_names,
-                    finish_reason=final_finish_reason,
-                )
-                log.info(
-                    "[OAI] json_final req_id=%s completion_id=%s chat_id=%s prompt_hash=%s finish_reason=%s stop_reason=%s tool_names=%s answer_chars=%s",
-                    req_id,
-                    completion_id,
-                    execution.chat_id,
-                    diagnostics["prompt_hash"],
-                    final_finish_reason,
-                    directive.stop_reason,
-                    tool_names,
-                    len(execution.state.answer_text or ""),
-                )
-
-                payload = build_openai_completion_payload(
-                    completion_id=completion_id,
-                    created=created,
-                    model_name=model_name,
-                    prompt=result.prompt,
-                    execution=execution,
-                    standard_request=standard_request,
-                )
-                if singleflight_owner and singleflight_key is not None:
-                    await _openai_json_singleflight.complete(singleflight_key, payload)
-                return JSONResponse(payload)
-        except Exception as e:
-            if singleflight_owner and singleflight_key is not None:
-                await _openai_json_singleflight.fail(singleflight_key, e)
-            await clear_invalidated_session_chat(app=app, request=standard_request)
-            raise HTTPException(status_code=500, detail=str(e))
+            return OpenAIStreamResponder(responder_context).response()
+        return await OpenAISyncResponder(responder_context).response()

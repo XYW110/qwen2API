@@ -203,21 +203,25 @@ def _has_tool_continuation_after_latest_user(messages: list, client_profile: str
     return False
 
 
-def build_prompt_with_tools(
-    system_prompt: str,
-    messages: list,
+def _wrap_system_prompt(rendered_system_prompt: str) -> str:
+    """Wrap the resolved system prompt in <system> tags."""
+    if rendered_system_prompt:
+        return f"<system>\n{rendered_system_prompt}\n</system>"
+    return ""
+
+
+def _build_tool_instructions_wrapper(
     tools: list,
+    client_profile: str,
     *,
-    client_profile: str = OPENCLAW_OPENAI_PROFILE,
     tool_choice_mode: str = "auto",
     required_tool_name: str | None = None,
-    tool_catalog=None,
-    skill_context: str = "",
-) -> str:
-    tool_reference_replacements = _tool_reference_rewrite_map(tool_catalog)
-    rendered_system_prompt = _rewrite_tool_name_references(system_prompt, tool_reference_replacements)
-    rendered_skill_context = _rewrite_tool_name_references(skill_context.strip(), tool_reference_replacements) if skill_context else ""
-    sys_part = f"<system>\n{rendered_system_prompt}\n</system>" if rendered_system_prompt else ""
+    system_prompt: str = "",
+) -> tuple[str, bool]:
+    """Build the tool instruction block and detect opencode override.
+
+    Returns (tools_part, opencode_override).
+    """
     tools_part = ""
     if tools:
         tools_part = build_tool_instruction_block(
@@ -226,7 +230,11 @@ def build_prompt_with_tools(
             tool_choice_mode=tool_choice_mode,
             required_tool_name=required_tool_name,
         )
-    opencode_override = bool(tools and client_profile == OPENCLAW_OPENAI_PROFILE and looks_like_opencode_system_prompt(system_prompt))
+    opencode_override = bool(
+        tools
+        and client_profile == OPENCLAW_OPENAI_PROFILE
+        and looks_like_opencode_system_prompt(system_prompt)
+    )
     if opencode_override and tools_part:
         tools_part = "\n".join(
             [
@@ -240,15 +248,29 @@ def build_prompt_with_tools(
                 tools_part,
             ]
         )
+    return tools_part, opencode_override
 
-    history_parts = []
-    used = 0
-    msg_count = 0
+
+def _render_history_wrapper(
+    messages: list,
+    *,
+    system_prompt: str,
+    tools: list,
+    client_profile: str,
+    tool_reference_replacements: dict[str, str],
+    tool_catalog=None,
+) -> list[str]:
+    """Render message history into a list of prefixed text lines."""
+    history_parts: list[str] = []
     for msg in reversed(messages):
         role = msg.get("role", "")
         if role not in ("user", "assistant", "system", "developer", "tool"):
             continue
-        if role in {"system", "developer"} and system_prompt and _extract_system_text_only(msg.get("content", "")).strip() in system_prompt.strip():
+        if (
+            role in {"system", "developer"}
+            and system_prompt
+            and _extract_system_text_only(msg.get("content", "")).strip() in system_prompt.strip()
+        ):
             continue
 
         if role == "tool":
@@ -256,17 +278,21 @@ def build_prompt_with_tools(
             tool_call_id = msg.get("tool_call_id", "")
             if isinstance(tool_content, list):
                 tool_content = "\n".join(
-                    p.get("text", "") for p in tool_content if isinstance(p, dict) and p.get("type") == "text"
+                    p.get("text", "")
+                    for p in tool_content
+                    if isinstance(p, dict) and p.get("type") == "text"
                 )
             elif not isinstance(tool_content, str):
                 tool_content = str(tool_content)
             line = f"[Tool Result]{(' id=' + tool_call_id) if tool_call_id else ''}\n{tool_content}\n[/Tool Result]"
             history_parts.insert(0, line)
-            used += len(line) + 2
-            msg_count += 1
             continue
 
-        user_text_only = _extract_user_text_only(msg.get("content", ""), client_profile=client_profile) if role == "user" else ""
+        user_text_only = (
+            _extract_user_text_only(msg.get("content", ""), client_profile=client_profile)
+            if role == "user"
+            else ""
+        )
         if role in {"system", "developer"}:
             text = _extract_system_text_only(msg.get("content", ""))
         else:
@@ -298,90 +324,130 @@ def build_prompt_with_tools(
 
         lower_text = text.lower()
         is_tool_result = role == "user" and (
-            "[tool result" in lower_text or text.startswith("{") or '"results"' in text[:100]
+            "[tool result" in lower_text
+            or text.startswith("{")
+            or '"results"' in text[:100]
         )
-        is_tool_result_only_user_msg = role == "user" and not user_text_only.strip() and bool(text.strip())
+        is_tool_result_only_user_msg = (
+            role == "user" and not user_text_only.strip() and bool(text.strip())
+        )
         if role in {"user", "system", "developer"} and not is_tool_result and not is_tool_result_only_user_msg:
             text = _rewrite_tool_name_references(text, tool_reference_replacements)
-        prefix = "" if is_tool_result_only_user_msg else {"user": "Human: ", "assistant": "Assistant: ", "system": "System: ", "developer": "System: "}.get(role, "")
+        prefix = (
+            ""
+            if is_tool_result_only_user_msg
+            else {
+                "user": "Human: ",
+                "assistant": "Assistant: ",
+                "system": "System: ",
+                "developer": "System: ",
+            }.get(role, "")
+        )
         line = text if is_tool_result_only_user_msg else f"{prefix}{text}"
         history_parts.insert(0, line)
-        used += len(line) + 2
-        msg_count += 1
+    return history_parts
 
-    if tools and messages and client_profile != CLAUDE_CODE_OPENAI_PROFILE:
-        first_user = next(
-            (
-                message for message in messages
-                if message.get("role") == "user"
-                and _extract_user_text_only(message.get("content", ""), client_profile=client_profile).strip()
-            ),
-            None,
-        )
-        if first_user:
-            first_text = _extract_user_text_only(first_user.get("content", ""), client_profile=client_profile)
-            first_text = _rewrite_tool_name_references(first_text, tool_reference_replacements)
-            first_short = first_text
-            first_line = f"Human: {first_short}"
-            if not history_parts or not history_parts[0].startswith(f"Human: {first_text[:60]}"):
-                first_line_cost = len(first_line) + 2
-                history_parts.insert(0, first_line)
-                used += first_line_cost
-                log.debug(f"[Prompt] Restored original task context ({len(first_short)} chars)")
 
+def _pin_first_user_message(
+    history_parts: list[str],
+    messages: list,
+    *,
+    tools: list,
+    client_profile: str,
+    tool_reference_replacements: dict[str, str],
+) -> list[str]:
+    """Restore the original task context (first user message) when missing."""
+    if not (tools and messages and client_profile != CLAUDE_CODE_OPENAI_PROFILE):
+        return history_parts
+
+    first_user = next(
+        (
+            message
+            for message in messages
+            if message.get("role") == "user"
+            and _extract_user_text_only(
+                message.get("content", ""), client_profile=client_profile
+            ).strip()
+        ),
+        None,
+    )
+    if not first_user:
+        return history_parts
+
+    first_text = _extract_user_text_only(first_user.get("content", ""), client_profile=client_profile)
+    first_text = _rewrite_tool_name_references(first_text, tool_reference_replacements)
+    first_line = f"Human: {first_text}"
+    if not history_parts or not history_parts[0].startswith(f"Human: {first_text[:60]}"):
+        history_parts.insert(0, first_line)
+        log.debug(f"[Prompt] Restored original task context ({len(first_text)} chars)")
+    return history_parts
+
+
+def _highlight_latest_user_message(
+    messages: list,
+    history_parts: list[str],
+    *,
+    rendered_skill_context: str,
+    tools: list,
+    client_profile: str,
+    tool_reference_replacements: dict[str, str],
+) -> tuple[str, list[str]]:
+    """Build the CURRENT TASK line for the latest user message and deduplicate.
+
+    Returns (latest_user_line, potentially modified history_parts).
+    """
     latest_user_line = ""
-    has_tool_continuation = _has_tool_continuation_after_latest_user(messages, client_profile) if messages else False
-    should_show_latest_user_line = not has_tool_continuation and (bool(rendered_skill_context) or bool(tools))
-    if messages and should_show_latest_user_line:
+    has_tool_continuation = (
+        _has_tool_continuation_after_latest_user(messages, client_profile)
+        if messages
+        else False
+    )
+    should_show = not has_tool_continuation and (bool(rendered_skill_context) or bool(tools))
+
+    if messages and should_show:
         latest_user = next(
             (
-                message for message in reversed(messages)
+                message
+                for message in reversed(messages)
                 if message.get("role") == "user"
-                and _extract_user_text_only(message.get("content", ""), client_profile=client_profile).strip()
+                and _extract_user_text_only(
+                    message.get("content", ""), client_profile=client_profile
+                ).strip()
             ),
             None,
         )
         if latest_user:
-            latest_text = _extract_user_text_only(latest_user.get("content", ""), client_profile=client_profile).strip()
+            latest_text = _extract_user_text_only(
+                latest_user.get("content", ""), client_profile=client_profile
+            ).strip()
             latest_text = _rewrite_tool_name_references(latest_text, tool_reference_replacements)
             if latest_text:
-                latest_short = latest_text
-                latest_user_line = f"Human (CURRENT TASK - TOP PRIORITY): {latest_short}"
+                latest_user_line = f"Human (CURRENT TASK - TOP PRIORITY): {latest_text}"
 
+    # De-duplicate: if the current task line matches an existing history line,
+    # remove the duplicate from history.
     if latest_user_line and (rendered_skill_context or len(history_parts) > 1):
-        duplicate_latest_line = latest_user_line.replace("Human (CURRENT TASK - TOP PRIORITY): ", "Human: ", 1)
+        duplicate_latest_line = latest_user_line.replace(
+            "Human (CURRENT TASK - TOP PRIORITY): ", "Human: ", 1
+        )
         for index in range(len(history_parts) - 1, -1, -1):
             if history_parts[index] == duplicate_latest_line:
                 history_parts.pop(index)
                 break
 
-    if tools and log.isEnabledFor(logging.DEBUG):
-        tool_names = [tool.get("name", "") for tool in tools if tool.get("name")]
-        tool_instruction_preview = _safe_preview(tools_part, 360)
-        latest_user_preview = _safe_preview(latest_user_line, 220)
-        first_user_preview = ""
-        if messages:
-            first_user = next((message for message in messages if message.get("role") == "user"), None)
-            if first_user:
-                first_user_preview = _safe_preview(
-                    _extract_text(
-                        first_user.get("content", ""),
-                        user_tool_mode=_is_heavy_tool_profile(client_profile),
-                        client_profile=client_profile,
-                    ),
-                    220,
-                )
-        log.debug(
-            "[Prompt] 工具模式: history_msgs=%s history_chars=%s tool_count=%s tool_names=%s first_user=%r latest_user=%r tool_instr=%r",
-            len(history_parts),
-            used,
-            len(tool_names),
-            tool_names[:12],
-            first_user_preview,
-            latest_user_preview,
-            tool_instruction_preview,
-        )
-    parts = []
+    return latest_user_line, history_parts
+
+
+def _assemble_final_prompt(
+    tools_part: str,
+    opencode_override: bool,
+    sys_part: str,
+    rendered_skill_context: str,
+    history_parts: list[str],
+    latest_user_line: str,
+) -> str:
+    """Assemble all prompt sections in the canonical order."""
+    parts: list[str] = []
     if tools_part and opencode_override:
         parts.append(tools_part)
     if sys_part:
@@ -396,6 +462,93 @@ def build_prompt_with_tools(
     parts.append("Assistant:")
     return "\n\n".join(parts)
 
+
+def build_prompt_with_tools(
+    system_prompt: str,
+    messages: list,
+    tools: list,
+    *,
+    client_profile: str = OPENCLAW_OPENAI_PROFILE,
+    tool_choice_mode: str = "auto",
+    required_tool_name: str | None = None,
+    tool_catalog=None,
+    skill_context: str = "",
+) -> str:
+    tool_reference_replacements = _tool_reference_rewrite_map(tool_catalog)
+    rendered_system_prompt = _rewrite_tool_name_references(system_prompt, tool_reference_replacements)
+    rendered_skill_context = (
+        _rewrite_tool_name_references(skill_context.strip(), tool_reference_replacements)
+        if skill_context
+        else ""
+    )
+
+    sys_part = _wrap_system_prompt(rendered_system_prompt)
+    tools_part, opencode_override = _build_tool_instructions_wrapper(
+        tools,
+        client_profile,
+        tool_choice_mode=tool_choice_mode,
+        required_tool_name=required_tool_name,
+        system_prompt=system_prompt,
+    )
+
+    history_parts = _render_history_wrapper(
+        messages,
+        system_prompt=system_prompt,
+        tools=tools,
+        client_profile=client_profile,
+        tool_reference_replacements=tool_reference_replacements,
+        tool_catalog=tool_catalog,
+    )
+
+    # Debug log — isolated in the main orchestrator
+    if tools and log.isEnabledFor(logging.DEBUG):
+        tool_names = [tool.get("name", "") for tool in tools if tool.get("name")]
+        tool_instruction_preview = _safe_preview(tools_part, 360)
+        first_user_preview = ""
+        if messages:
+            first_user = next((m for m in messages if m.get("role") == "user"), None)
+            if first_user:
+                first_user_preview = _safe_preview(
+                    _extract_text(
+                        first_user.get("content", ""),
+                        user_tool_mode=_is_heavy_tool_profile(client_profile),
+                        client_profile=client_profile,
+                    ),
+                    220,
+                )
+        log.debug(
+            "[Prompt] 工具模式: history_msgs=%s tool_count=%s tool_names=%s first_user=%r tool_instr=%r",
+            len(history_parts),
+            len(tool_names),
+            tool_names[:12],
+            first_user_preview,
+            tool_instruction_preview,
+        )
+
+    history_parts = _pin_first_user_message(
+        history_parts,
+        messages,
+        tools=tools,
+        client_profile=client_profile,
+        tool_reference_replacements=tool_reference_replacements,
+    )
+    latest_user_line, history_parts = _highlight_latest_user_message(
+        messages,
+        history_parts,
+        rendered_skill_context=rendered_skill_context,
+        tools=tools,
+        client_profile=client_profile,
+        tool_reference_replacements=tool_reference_replacements,
+    )
+
+    return _assemble_final_prompt(
+        tools_part,
+        opencode_override,
+        sys_part,
+        rendered_skill_context,
+        history_parts,
+        latest_user_line,
+    )
 
 def messages_to_prompt(req_data: dict, *, client_profile: str = OPENCLAW_OPENAI_PROFILE) -> PromptBuildResult:
     resolved_client_profile = client_profile

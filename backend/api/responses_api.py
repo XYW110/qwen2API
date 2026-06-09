@@ -13,10 +13,8 @@ from backend.adapter.standard_request import StandardRequest, detect_openai_clie
 from backend.core.config import API_KEYS, settings
 from backend.core.request_logging import new_request_id, request_context, update_request_context
 from backend.runtime.execution import RuntimeAttemptState, build_tool_directive, build_usage_delta_factory, request_max_attempts
-from backend.services.attachment_preprocessor import preprocess_attachments
 from backend.services.auth_quota import resolve_auth_context
 from backend.services.completion_bridge import run_retryable_completion_bridge
-from backend.services.context_attachment_manager import derive_session_key, prepare_context_attachments
 from backend.services.qwen_client import QwenClient
 from backend.services.responses_compat import (
     PreparedResponsesRequest,
@@ -27,13 +25,12 @@ from backend.services.responses_compat import (
     sse_event,
 )
 from backend.services.response_formatters import build_openai_response_payload
+from backend.services.session_orchestrator import SessionOrchestrator
 from backend.services.standard_request_builder import build_chat_standard_request
 from backend.toolcore.task_session import (
     build_openai_assistant_history_message,
     clear_invalidated_session_chat,
-    log_session_plan_reuse_cancelled,
     persist_session_turn,
-    plan_persistent_session_turn,
 )
 
 router = APIRouter()
@@ -111,56 +108,17 @@ async def create_response(request: Request):
     transformed_req = prepared.transformed_payload
     previous_response_id = prepared.previous_response_id
     client_profile = _detect_openai_client_profile(request, raw_req_data)
-    session_key = derive_session_key("responses", token, transformed_req)
-
-    file_store = getattr(app.state, "file_store", None)
-    preprocessed = None
-    if file_store is not None:
-        preprocessed = await preprocess_attachments(transformed_req, file_store, owner_token=token)
-        transformed_req = preprocessed.payload
-
-    context_prepared = await prepare_context_attachments(
+    orchestration = await SessionOrchestrator.prepare(
         app=app,
         payload=transformed_req,
         surface="responses",
-        auth_token=token,
+        token=token,
         client_profile=client_profile,
-        existing_attachments=(preprocessed.attachments if preprocessed is not None else None),
+        build_standard_request=lambda payload: _build_standard_request(payload, client_profile=client_profile),
     )
-    transformed_req = context_prepared["payload"]
-
-    standard_request = _build_standard_request(transformed_req, client_profile=client_profile)
-    if preprocessed is not None:
-        standard_request.attachments = preprocessed.attachments
-        standard_request.uploaded_file_ids = preprocessed.uploaded_file_ids
-    standard_request.upstream_files = context_prepared["upstream_files"]
-    standard_request.session_key = context_prepared["session_key"]
-    standard_request.context_mode = context_prepared["context_mode"]
-    standard_request.context_attachment_tokens = context_prepared.get("context_attachment_tokens", 0)
-    standard_request.bound_account_email = context_prepared["bound_account_email"]
-    standard_request.bound_account = context_prepared["bound_account"]
-
-    session_plan = await plan_persistent_session_turn(app=app, request=standard_request, payload=transformed_req, surface="responses")
-    if session_plan.enabled:
-        standard_request.persistent_session = True
-        standard_request.full_prompt = session_plan.full_prompt
-        standard_request.prompt = session_plan.prompt
-        standard_request.session_message_hashes = session_plan.current_hashes
-        standard_request.upstream_chat_id = session_plan.existing_chat_id if session_plan.reuse_chat else None
-        if standard_request.bound_account is None and session_plan.account_email:
-            standard_request.bound_account = await app.state.account_pool.acquire_wait_preferred(session_plan.account_email, timeout=60)
-            if standard_request.bound_account is not None:
-                standard_request.bound_account_email = standard_request.bound_account.email
-        elif standard_request.bound_account is not None and not standard_request.bound_account_email:
-            standard_request.bound_account_email = standard_request.bound_account.email
-        if standard_request.upstream_chat_id and standard_request.bound_account is None:
-            log_session_plan_reuse_cancelled(
-                request=standard_request,
-                planned_chat_id=session_plan.existing_chat_id,
-                reason="missing_bound_account",
-            )
-            standard_request.upstream_chat_id = None
-            standard_request.prompt = standard_request.full_prompt or standard_request.prompt
+    transformed_req = orchestration.working_payload
+    standard_request = orchestration.standard_request
+    session_key = standard_request.session_key
 
     model_name = standard_request.response_model
     prompt = standard_request.prompt
@@ -340,56 +298,17 @@ async def create_response_websocket(websocket: WebSocket):
         transformed_req = prepared.transformed_payload
         previous_response_id = prepared.previous_response_id
         client_profile = _detect_openai_client_profile(websocket, raw_req_data)
-        session_key = derive_session_key("responses", token, transformed_req)
-
-        file_store = getattr(app.state, "file_store", None)
-        preprocessed = None
-        if file_store is not None:
-            preprocessed = await preprocess_attachments(transformed_req, file_store, owner_token=token)
-            transformed_req = preprocessed.payload
-
-        context_prepared = await prepare_context_attachments(
+        orchestration = await SessionOrchestrator.prepare(
             app=app,
             payload=transformed_req,
             surface="responses",
-            auth_token=token,
+            token=token,
             client_profile=client_profile,
-            existing_attachments=(preprocessed.attachments if preprocessed is not None else None),
+            build_standard_request=lambda payload: _build_standard_request(payload, client_profile=client_profile),
         )
-        transformed_req = context_prepared["payload"]
-
-        standard_request = _build_standard_request(transformed_req, client_profile=client_profile)
-        if preprocessed is not None:
-            standard_request.attachments = preprocessed.attachments
-            standard_request.uploaded_file_ids = preprocessed.uploaded_file_ids
-        standard_request.upstream_files = context_prepared["upstream_files"]
-        standard_request.session_key = context_prepared["session_key"]
-        standard_request.context_mode = context_prepared["context_mode"]
-        standard_request.context_attachment_tokens = context_prepared.get("context_attachment_tokens", 0)
-        standard_request.bound_account_email = context_prepared["bound_account_email"]
-        standard_request.bound_account = context_prepared["bound_account"]
-
-        session_plan = await plan_persistent_session_turn(app=app, request=standard_request, payload=transformed_req, surface="responses")
-        if session_plan.enabled:
-            standard_request.persistent_session = True
-            standard_request.full_prompt = session_plan.full_prompt
-            standard_request.prompt = session_plan.prompt
-            standard_request.session_message_hashes = session_plan.current_hashes
-            standard_request.upstream_chat_id = session_plan.existing_chat_id if session_plan.reuse_chat else None
-            if standard_request.bound_account is None and session_plan.account_email:
-                standard_request.bound_account = await app.state.account_pool.acquire_wait_preferred(session_plan.account_email, timeout=60)
-                if standard_request.bound_account is not None:
-                    standard_request.bound_account_email = standard_request.bound_account.email
-            elif standard_request.bound_account is not None and not standard_request.bound_account_email:
-                standard_request.bound_account_email = standard_request.bound_account.email
-            if standard_request.upstream_chat_id and standard_request.bound_account is None:
-                log_session_plan_reuse_cancelled(
-                    request=standard_request,
-                    planned_chat_id=session_plan.existing_chat_id,
-                    reason="missing_bound_account",
-                )
-                standard_request.upstream_chat_id = None
-                standard_request.prompt = standard_request.full_prompt or standard_request.prompt
+        transformed_req = orchestration.working_payload
+        standard_request = orchestration.standard_request
+        session_key = standard_request.session_key
 
         model_name = standard_request.response_model
         prompt = standard_request.prompt
