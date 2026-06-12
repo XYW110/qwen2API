@@ -1,9 +1,11 @@
 import json
 import logging
 import time
+import uuid
+from datetime import datetime, timezone, timedelta
 from typing import AsyncIterator
 
-import httpx
+from curl_cffi.requests import AsyncSession
 
 from backend.core.account_pool import AccountPool
 from backend.core.config import settings
@@ -11,6 +13,7 @@ from backend.services.auth_resolver import BASE_URL, AuthResolver
 from backend.upstream.payload_builder import build_chat_payload
 from backend.upstream.qwen_executor import QwenExecutor
 from backend.upstream.sse_consumer import parse_sse_chunk
+from backend.services.waf_cookie_manager import WafCookieManager
 
 log = logging.getLogger("qwen2api.client")
 
@@ -28,29 +31,73 @@ class QwenClient:
 
     @staticmethod
     def _build_headers(token: str) -> dict[str, str]:
+        tz = datetime.now(timezone(timedelta(hours=8))).strftime("%a %b %d %Y %H:%M:%S GMT+0800")
         return {
             "Authorization": f"Bearer {token}",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9",
             "Referer": f"{BASE_URL}/",
             "Origin": BASE_URL,
             "Connection": "keep-alive",
             "Content-Type": "application/json",
+            "X-Accel-Buffering": "no",
+            "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "x-request-id": str(uuid.uuid4()),
+            "Timezone": tz,
+            "source": "web",
+            "Version": "0.2.64",
         }
 
     @staticmethod
     def _build_headers_with_cookies(cookies: str) -> dict[str, str]:
         """使用 cookies 而不是 Bearer token 构建请求头"""
+        tz = datetime.now(timezone(timedelta(hours=8))).strftime("%a %b %d %Y %H:%M:%S GMT+0800")
         return {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9",
             "Referer": f"{BASE_URL}/",
             "Origin": BASE_URL,
             "Connection": "keep-alive",
             "Content-Type": "application/json",
+            "X-Accel-Buffering": "no",
             "Cookie": cookies,
+            "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "x-request-id": str(uuid.uuid4()),
+            "Timezone": tz,
+            "source": "web",
+            "Version": "0.2.64",
+        }
+
+    async def _build_completions_headers(self, token: str, account=None) -> dict[str, str]:
+        """为 completions 端点构建请求头（包含 WAF cookies）。"""
+        waf_cookies = ""
+        if account:
+            waf_mgr = WafCookieManager.get_instance()
+            waf_cookies = await waf_mgr.get_cookies(account)
+        tz = datetime.now(timezone(timedelta(hours=8))).strftime("%a %b %d %Y %H:%M:%S GMT+0800")
+        return {
+            "Authorization": f"Bearer {token}",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+            "Referer": f"{BASE_URL}/",
+            "Origin": BASE_URL,
+            "Content-Type": "application/json",
+            "X-Accel-Buffering": "no",
+            "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "x-request-id": str(uuid.uuid4()),
+            "Timezone": tz,
+            "source": "web",
+            "Version": "0.2.64",
+            "Cookie": waf_cookies,
         }
 
     async def _request_json(
@@ -64,12 +111,12 @@ class QwenClient:
         request_timeout = (
             timeout if timeout is not None else settings.QWEN_UPSTREAM_REQUEST_TIMEOUT_SECONDS
         )
-        async with httpx.AsyncClient(timeout=request_timeout, follow_redirects=True) as hc:
-            resp = await hc.request(
+        async with AsyncSession(impersonate="chrome124", timeout=request_timeout) as s:
+            resp = await s.request(
                 method,
                 f"{BASE_URL}{path}",
                 headers=self._build_headers(token),
-                json=body,
+                data=json.dumps(body, ensure_ascii=False).encode() if body else None,
             )
         return {"status": resp.status_code, "body": resp.text}
 
@@ -131,8 +178,8 @@ class QwenClient:
             return False
 
         try:
-            async with httpx.AsyncClient(timeout=15) as hc:
-                resp = await hc.get(
+            async with AsyncSession(impersonate="chrome124", timeout=15) as s:
+                resp = await s.get(
                     f"{BASE_URL}/api/v1/auths/",
                     headers=self._build_headers(token),
                 )
@@ -168,8 +215,8 @@ class QwenClient:
             else:
                 return self._models_cache  # 无凭据时返回缓存（可能为空）
 
-            async with httpx.AsyncClient(timeout=10) as hc:
-                resp = await hc.get(
+            async with AsyncSession(impersonate="chrome124", timeout=10) as s:
+                resp = await s.get(
                     f"{BASE_URL}/api/models",
                     headers=headers,
                 )
@@ -192,32 +239,52 @@ class QwenClient:
     def parse_sse_chunk(self, chunk: str) -> list[dict]:
         return parse_sse_chunk(chunk)
 
-    async def stream(self, token: str, chat_id: str, model: str, content: str, has_custom_tools: bool = False, files: list[dict] | None = None):
-        async for event in self.executor.stream(token, chat_id, model, content, has_custom_tools, files=files):
+    async def stream(self, token: str, chat_id: str, model: str, content: str, has_custom_tools: bool = False, files: list[dict] | None = None, account=None):
+        async for event in self.executor.stream(token, chat_id, model, content, has_custom_tools, files=files, account=account):
             yield event
 
-    async def stream_chat_once(self, token: str, chat_id: str, payload: dict) -> AsyncIterator[dict]:
-        # 流式读取允许更长的模型思考/首 token 等待时间
-        timeout = httpx.Timeout(
-            connect=30.0,
-            read=settings.QWEN_UPSTREAM_STREAM_TIMEOUT_SECONDS,
-            write=30.0,
-            pool=30.0,
-        )
-        async with httpx.AsyncClient(timeout=timeout) as hc:
-            async with hc.stream(
+    async def stream_chat_once(self, token: str, chat_id: str, payload: dict, account=None) -> AsyncIterator[dict]:
+        """流式读取 completions 端点，支持 WAF cookie 和 x5sec 重试。"""
+        headers = await self._build_completions_headers(token, account)
+
+        timeout_val = settings.QWEN_UPSTREAM_STREAM_TIMEOUT_SECONDS
+        async with AsyncSession(impersonate="chrome124", timeout=timeout_val) as s:
+            resp = await s.request(
                 "POST",
                 f"{BASE_URL}/api/v2/chat/completions?chat_id={chat_id}",
-                headers=self._build_headers(token),
-                json=payload,
-            ) as resp:
-                if resp.status_code != 200:
-                    yield {"status": resp.status_code, "body": await resp.aread()}
-                    return
-                async for chunk in resp.aiter_text():
-                    if chunk:
-                        yield {"chunk": chunk}
-                yield {"status": "streamed"}
+                headers=headers,
+                data=json.dumps(payload, ensure_ascii=False).encode(),
+            )
+
+            # 检测 x5sec 拦截
+            resp_text = resp.text or ""
+            if resp.status_code == 200 and ("_____tmd_____" in resp_text or "<script>" in resp_text):
+                log.warning("[stream_chat_once] 检测到 x5sec 拦截，标记 cookies 过期并重试...")
+                if account:
+                    waf_mgr = WafCookieManager.get_instance()
+                    waf_mgr.mark_expired(account)
+
+                # 重试一次
+                new_headers = await self._build_completions_headers(token, account)
+                async with AsyncSession(impersonate="chrome124", timeout=timeout_val) as s2:
+                    resp = await s2.request(
+                        "POST",
+                        f"{BASE_URL}/api/v2/chat/completions?chat_id={chat_id}",
+                        headers=new_headers,
+                        data=json.dumps(payload, ensure_ascii=False).encode(),
+                    )
+                    resp_text = resp.text or ""
+
+            if resp.status_code != 200:
+                body_bytes = resp.content if isinstance(resp.content, bytes) else resp_text.encode()
+                log.error(f"[stream_chat_once] non-200 status={resp.status_code} body={resp_text[:500]}")
+                yield {"status": resp.status_code, "body": body_bytes}
+                return
+
+            log.info(f"[stream_chat_once] status=200 bytes={len(resp_text)} preview={resp_text[:200]}")
+            if resp_text:
+                yield {"chunk": resp_text}
+            yield {"status": "streamed"}
 
     async def chat_stream_events_with_retry(
         self,

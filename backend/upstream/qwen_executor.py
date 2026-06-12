@@ -96,6 +96,7 @@ class QwenExecutor:
         content: str,
         has_custom_tools: bool = False,
         files: list[dict] | None = None,
+        account=None,
     ):
         stream_fn = getattr(self.engine, "stream_chat_once", None) or getattr(self.engine, "fetch_chat", None)
         if stream_fn is None:
@@ -126,7 +127,7 @@ class QwenExecutor:
         log.info(f"[Executor] prompt preview (first 500 chars): {prompt_content[:500]}")
 
         try:
-            async for chunk_result in stream_fn(token, chat_id, payload):
+            async for chunk_result in stream_fn(token, chat_id, payload, account=account):
                 last_chunk_time = time.perf_counter()
 
                 if chunk_result.get("status") not in (None, 200, "streamed"):
@@ -222,7 +223,7 @@ class QwenExecutor:
                 else:
                     log.info(f"[Executor] created chat_id={chat_id} account={acc.email}")
                 yield {"type": "meta", "chat_id": chat_id, "acc": acc}
-                async for evt in self.stream(acc.token, chat_id, model, content, has_custom_tools, files=files):
+                async for evt in self.stream(acc.token, chat_id, model, content, has_custom_tools, files=files, account=acc):
                     yield {"type": "event", "event": evt}
                 return
             except Exception:
@@ -254,7 +255,7 @@ class QwenExecutor:
                 update_request_context(chat_id=chat_id)
                 yield {"type": "meta", "chat_id": chat_id, "acc": acc}
 
-                async for evt in self.stream(acc.token, chat_id, model, content, has_custom_tools, files=files):
+                async for evt in self.stream(acc.token, chat_id, model, content, has_custom_tools, files=files, account=acc):
                     yield {"type": "event", "event": evt}
                 return
 

@@ -54,6 +54,8 @@ class Account:
         self.cooldown_started_at = float(kwargs.pop("cooldown_started_at", 0.0) or 0.0)
         self.tok_s = float(kwargs.get("tok_s", 0.0) or 0.0)
         self.tok_s_updated_at = float(kwargs.get("tok_s_updated_at", 0.0) or 0.0)
+        self.waf_cookies: str = kwargs.get("waf_cookies", "") or ""
+        self.waf_cookies_expires_at: float = float(kwargs.get("waf_cookies_expires_at", 0) or 0)
         # Real wall-clock start time for tok/s calculation (not affected by jitter)
         self._tok_s_start_time = 0.0
 

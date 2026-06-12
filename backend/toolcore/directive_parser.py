@@ -38,6 +38,21 @@ def parse_state_tool_calls(state_tool_calls: list[dict[str, Any]], allowed_tool_
     return ToolDirectiveParseResult(canonical_calls=canonical_calls, tool_blocks=tool_blocks, stop_reason=stop_reason)
 
 
+def _resolve_tool_name(raw_name: str, tool_names: set[str]) -> str:
+    """Case-insensitive tool name resolution.
+
+    Returns the canonical name from *tool_names* if *raw_name* matches
+    case-insensitively; otherwise returns *raw_name* unchanged.
+    """
+    if raw_name in tool_names or not raw_name:
+        return raw_name
+    lowered = raw_name.lower()
+    for name in tool_names:
+        if name.lower() == lowered:
+            return name
+    return raw_name
+
+
 def parse_textual_tool_calls(answer_text: str, tools: list[dict[str, Any]]) -> ToolDirectiveParseResult:
     if not tools or not answer_text:
         return ToolDirectiveParseResult(tool_blocks=[{"type": "text", "text": answer_text}], stop_reason="end_turn")
@@ -57,12 +72,13 @@ def parse_textual_tool_calls(answer_text: str, tools: list[dict[str, Any]]) -> T
                 if isinstance(obj, dict) and obj.get("name"):
                     raw_name = str(obj.get("name", ""))
                     raw_input = obj.get("input", obj.get("args", obj.get("arguments", obj.get("parameters", {}))))
-                    if raw_name in tool_names:
+                    resolved = _resolve_tool_name(raw_name, tool_names)
+                    if resolved in tool_names:
                         tool_blocks.append(
                             {
                                 "type": "tool_use",
                                 "id": f"toolu_{len(tool_blocks)}",
-                                "name": raw_name,
+                                "name": resolved,
                                 "input": normalize_arguments(raw_input),
                             }
                         )

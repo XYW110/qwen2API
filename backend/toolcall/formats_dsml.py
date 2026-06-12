@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import logging
 import re
 from typing import Any
 
@@ -23,6 +24,8 @@ ATTR_TRANSLATION = str.maketrans({
 })
 
 __all__ = ["consume_dsml_tool_capture", "has_open_dsml_tool_tag", "parse_dsml_format"]
+
+log = logging.getLogger(__name__)
 
 
 def _tag_source(text: str, tag: ToolMarkupTag) -> str:
@@ -54,7 +57,13 @@ def _restore_cdata(text: str) -> str:
 def _coerce_scalar(value: str) -> Any:
     raw = value.strip()
     restored = _restore_cdata(raw)
-    stripped = restored if _is_wrapped_cdata(raw) else html.unescape(restored)
+
+    # CDATA-wrapped values are always treated as literal strings;
+    # the wrapper is an explicit signal that type coercion is unwanted.
+    if _is_wrapped_cdata(raw):
+        return restored
+
+    stripped = html.unescape(restored)
     if stripped == "":
         return ""
 
@@ -212,6 +221,11 @@ def parse_dsml_format(text: str, allowed_names: set[str]) -> list[dict[str, Any]
     candidate = _repair_missing_wrapper(text.strip())
     wrappers = _find_blocks(candidate, "tool_calls")
     if not wrappers:
+        # No complete <|DSML|tool_calls> block found — if the text
+        # still contains DSML markers, log so the incomplete output
+        # is not silently discarded.
+        if "<|DSML|" in candidate:
+            log.debug("parse_dsml_format: DSML markup present but no complete tool_calls block found")
         return []
 
     calls: list[dict[str, Any]] = []

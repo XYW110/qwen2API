@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import re
 from typing import Any
 
@@ -18,6 +19,12 @@ def _inside_spans(pos: int, spans: list[tuple[int, int]]) -> bool:
     return any(start <= pos < end for start, end in spans)
 
 
+@functools.lru_cache(maxsize=64)
+def _fence_closer_pattern(fence: str) -> re.Pattern:
+    """Return a pre-compiled regex that matches the closing fence line."""
+    return re.compile(rf"(?m)^[ \t]*{re.escape(fence)}[ \t]*(?:\n|$)")
+
+
 def _markdown_code_spans(text: str) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
     pos = 0
@@ -26,7 +33,7 @@ def _markdown_code_spans(text: str) -> list[tuple[int, int]]:
         if opener is None:
             break
         fence = opener.group(1)
-        closer = re.compile(rf"(?m)^[ \t]*{re.escape(fence)}[ \t]*(?:\n|$)").search(text, opener.end())
+        closer = _fence_closer_pattern(fence).search(text, opener.end())
         if closer is None:
             spans.append((opener.start(), len(text)))
             break
@@ -71,7 +78,7 @@ def _unclosed_markdown_code_start(text: str) -> int:
         if opener is None:
             break
         fence = opener.group(1)
-        closer = re.compile(rf"(?m)^[ \t]*{re.escape(fence)}[ \t]*(?:\n|$)").search(text, opener.end())
+        closer = _fence_closer_pattern(fence).search(text, opener.end())
         if closer is None:
             return opener.start()
         pos = closer.end()

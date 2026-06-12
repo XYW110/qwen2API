@@ -18,6 +18,7 @@ from backend.toolcore.directive_parser import parse_state_tool_calls, parse_text
 from backend.toolcore.policy import evaluate_tool_policy, recent_same_tool_identity_count_in_turn
 from backend.toolcore.stream_sieve import ToolStreamSieve
 from backend.toolcall.markup_scan import contains_tool_markup_syntax_outside_ignored
+from backend.toolcall.formats_dsml import parse_dsml_format
 from backend.toolcall.runtime_tools import (
     is_list_directory_tool_name,
     is_read_tool_name,
@@ -383,6 +384,20 @@ def detect_terminal_tool_loop(
 def has_invalid_textual_tool_contract(answer_text: str) -> bool:
     if not answer_text:
         return False
+
+    # DSML format detection — if the model emits DSML markup with real
+    # (non-bridge) tool names but parse_dsml_format() returns nothing,
+    # the contract is invalid.
+    if "<|DSML|" in answer_text and contains_tool_markup_syntax_outside_ignored(answer_text):
+        if not _is_dsml_with_only_bridge_names(answer_text):
+            # Extract candidate tool names from invoke tags so parse_dsml_format
+            # can accept them; if parsing still yields nothing the DSML block
+            # is malformed.
+            candidate_names = set(re.findall(r'<\|DSML\|invoke\s+name="([^"]*)"', answer_text))
+            candidate_names = {n for n in candidate_names if not re.fullmatch(r"bridge-\d+", n)}
+            if candidate_names and not parse_dsml_format(answer_text, candidate_names):
+                return True
+
     if "##TOOL_CALL##" not in answer_text and "<tool_call>" not in answer_text:
         return False
     compact = answer_text.strip()

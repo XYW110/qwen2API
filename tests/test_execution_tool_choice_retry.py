@@ -175,7 +175,7 @@ class ExecutionToolChoiceRetryTests(unittest.TestCase):
         )
 
         self.assertTrue(retry.retry)
-        self.assertEqual(retry.reason, "unparsed_textual_tool_contract:Read")
+        self.assertEqual(retry.reason, "invalid_textual_tool_contract:Read")
 
     def test_mapped_bridge_missing_tool_error_retries(self) -> None:
         request = self._request()
